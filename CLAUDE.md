@@ -37,8 +37,10 @@ Apps emit events via `hotline.emit("event-name", data)`. These are fire-and-forg
 ### CLI Commands
 - `hotline cmd <type> --key value` — Inline args (auto-coerces types)
 - `hotline wait <event>` — Blocks until app emits matching event, prints payload, exits
+- `hotline wait-for-app [appId]` — Blocks until an app connects (use after hot reload)
 - `hotline watch` — Interactive TUI (app/command browser + live stream)
 - `hotline watch --passive` — Stream-only mode (CI/scripting)
+- `hotline restart` — Kill server and let launchd relaunch with new code
 
 ## Publishing
 
@@ -50,5 +52,5 @@ Apps emit events via `hotline.emit("event-name", data)`. These are fire-and-forg
 
 When modifying hotline's protocol or API:
 1. Run `bun test` and `bunx tsc --noEmit`
-2. Update `~/.claude/CLAUDE.md` if global dev rules are affected
+2. **Always update `~/.claude/CLAUDE.md`** — Keep the global Hotline section in sync with new commands, flags, and patterns. This is what all agents across all projects see.
 3. Update `~/.claude/commands/setup-hotline.md` if the client API or handler format changed
