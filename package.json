@@ -1,6 +1,6 @@
 {
   "name": "@dawsson/hotline",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local WebSocket dev bridge for React Native apps",
   "type": "module",
   "bin": {
