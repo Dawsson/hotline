@@ -101,7 +101,7 @@ function nextMessage(ws: WebSocket, timeout = 3000): Promise<any> {
 }
 
 /** Small delay for message propagation */
-const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms))
+const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms))
 
 function closeWs(ws: WebSocket | null) {
   if (ws && ws.readyState <= WebSocket.OPEN) ws.close()
@@ -318,7 +318,7 @@ describe("watch mode", () => {
     const cli = trackWs(await openWs("cli"))
     await request(cli, "test-ping", { v: 1 })
 
-    await tick(100)
+    await tick(30)
 
     // Should have received request + response events
     const reqEvent = events.find((e) => e.dir === "req" && e.msg?.type === "test-ping")
@@ -447,7 +447,7 @@ describe("createHotline client", () => {
     })
 
     hotline.connect()
-    await tick(200) // wait for connect + register
+    await tick(50) // wait for connect + register
 
     // Verify app shows up
     const cli = trackWs(await openWs("cli"))
@@ -473,14 +473,14 @@ describe("createHotline client", () => {
       appId: "com.test.async-client",
       handlers: {
         "slow-op": { handler: async () => {
-          await new Promise((r) => setTimeout(r, 50))
+          await new Promise((r) => setTimeout(r, 10))
           return { done: true }
         }},
       },
     })
 
     hotline.connect()
-    await tick(200)
+    await tick(50)
 
     const cli = trackWs(await openWs("cli", "com.test.async-client"))
     const res = await request(cli, "slow-op")
@@ -504,7 +504,7 @@ describe("createHotline client", () => {
     })
 
     hotline.connect()
-    await tick(200)
+    await tick(50)
 
     const cli = trackWs(await openWs("cli", "com.test.err-client"))
     const res = await request(cli, "will-fail")
@@ -523,7 +523,7 @@ describe("createHotline client", () => {
     })
 
     hotline.connect()
-    await tick(200)
+    await tick(50)
 
     const cli = trackWs(await openWs("cli", "com.test.unknown-cmd"))
     const res = await request(cli, "nonexistent")
@@ -544,7 +544,7 @@ describe("createHotline client", () => {
     hotline.handle("added-later", { handler: () => ({ dynamic: true }) } as any)
 
     hotline.connect()
-    await tick(200)
+    await tick(50)
 
     const cli = trackWs(await openWs("cli", "com.test.dynamic"))
     const res = await request(cli, "added-later")
@@ -563,7 +563,7 @@ describe("createHotline client", () => {
     })
 
     hotline.connect()
-    await tick(200)
+    await tick(50)
 
     const cli = trackWs(await openWs("cli", "com.test.ping-client"))
     const res = await request(cli, "ping")
