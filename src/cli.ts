@@ -186,6 +186,52 @@ async function query() {
   }
 }
 
+async function watch() {
+  const url = `ws://localhost:${port}?role=watch`
+  const dim = "\x1b[2m"
+  const reset = "\x1b[0m"
+  const cyan = "\x1b[36m"
+  const green = "\x1b[32m"
+  const red = "\x1b[31m"
+
+  console.error(`Watching hotline on port ${port}... (ctrl+c to stop)\n`)
+
+  return new Promise<void>((_, reject) => {
+    const ws = new WebSocket(url)
+
+    ws.addEventListener("message", (event) => {
+      try {
+        const { dir, appId, msg } = JSON.parse(String(event.data))
+        const time = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        const app = appId ? `${dim}${appId}${reset}` : ""
+
+        if (dir === "req") {
+          const arrow = `${cyan}▶${reset}`
+          const type = `${cyan}${msg.type}${reset}`
+          const payload = msg.payload ? ` ${dim}${JSON.stringify(msg.payload)}${reset}` : ""
+          console.error(`${dim}${time}${reset} ${arrow} ${type} ${app}${payload}`)
+        } else {
+          const ok = msg.ok
+          const arrow = ok ? `${green}◀${reset}` : `${red}◀${reset}`
+          const status = ok ? `${green}ok${reset}` : `${red}err${reset}`
+          const body = msg.data != null ? ` ${JSON.stringify(msg.data)}` : ""
+          const err = msg.error ? ` ${red}${msg.error}${reset}` : ""
+          console.error(`${dim}${time}${reset} ${arrow} ${status} ${app}${body}${err}`)
+        }
+      } catch {}
+    })
+
+    ws.addEventListener("error", () => {
+      reject(new Error(`Cannot connect to hotline server on port ${port}`))
+    })
+
+    ws.addEventListener("close", () => {
+      console.error("\nDisconnected.")
+      process.exit(0)
+    })
+  })
+}
+
 async function logs() {
   if (!existsSync(LOG_FILE)) die("No log file found.")
   const proc = Bun.spawn(["tail", "-f", LOG_FILE], {
@@ -194,7 +240,7 @@ async function logs() {
   await proc.exited
 }
 
-const COMMANDS = ["status", "start", "stop", "cmd", "query", "setup", "teardown", "logs"]
+const COMMANDS = ["status", "start", "stop", "cmd", "query", "watch", "setup", "teardown", "logs"]
 
 function closestCommand(input: string): string | null {
   let best: string | null = null
@@ -239,6 +285,7 @@ Commands:
   status                    Show connected apps
   cmd <type> [--payload]    Send command to app
   query <key>               Shorthand for get-state command
+  watch                     Live stream of all messages
   setup [--port N]          Install macOS launchd service
   teardown                  Remove launchd service
   logs                      Tail server log file
@@ -267,6 +314,9 @@ switch (command) {
     break
   case "query":
     await query()
+    break
+  case "watch":
+    await watch()
     break
   case "setup":
     await setup(port)

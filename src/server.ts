@@ -12,10 +12,11 @@ import {
 // ── State ──
 
 const apps = new Map<ServerWebSocket<ClientData>, AppConnection>()
+const watchers = new Set<ServerWebSocket<ClientData>>()
 const pendingRequests = new Map<string, PendingRequest>()
 
 interface ClientData {
-  role: "app" | "cli"
+  role: "app" | "cli" | "watch"
   appId?: string // for apps: their id; for cli: target app id
 }
 
@@ -80,6 +81,14 @@ function send(ws: ServerWebSocket<ClientData>, data: HotlineResponse) {
   ws.send(JSON.stringify(data))
 }
 
+function broadcast(event: { dir: "req" | "res"; appId?: string; msg: any }) {
+  if (watchers.size === 0) return
+  const payload = JSON.stringify(event)
+  for (const w of watchers) {
+    w.send(payload)
+  }
+}
+
 // ── Cleanup ──
 
 function cleanupApp(ws: ServerWebSocket<ClientData>) {
@@ -113,10 +122,11 @@ const server = Bun.serve<ClientData>({
 
   fetch(req, server) {
     const url = new URL(req.url)
+    const role = url.searchParams.get("role")
     const appId = url.searchParams.get("app") || undefined
 
     const upgraded = server.upgrade(req, {
-      data: { role: "cli" as const, appId },
+      data: { role: (role === "watch" ? "watch" : "cli") as any, appId },
     })
 
     if (!upgraded) {
@@ -125,7 +135,12 @@ const server = Bun.serve<ClientData>({
   },
 
   websocket: {
-    open(_ws) {},
+    open(ws) {
+      if (ws.data.role === "watch") {
+        watchers.add(ws)
+        log("Watcher connected")
+      }
+    },
 
     message(ws, raw) {
       let msg: any
@@ -140,6 +155,7 @@ const server = Bun.serve<ClientData>({
         ws.data = { role: "app", appId: msg.appId }
         apps.set(ws, { appId: msg.appId, connectedAt: Date.now() })
         log(`App registered: ${msg.appId}`)
+        broadcast({ dir: "req", appId: msg.appId, msg: { type: "register", appId: msg.appId } })
         return
       }
 
@@ -148,6 +164,8 @@ const server = Bun.serve<ClientData>({
         const pending = pendingRequests.get(msg.id)
         if (pending) {
           clearTimeout(pending.timer)
+          const appInfo = apps.get(pending.appSocket as ServerWebSocket<ClientData>)
+          broadcast({ dir: "res", appId: appInfo?.appId, msg })
           const cliWs = pending.cliSocket as ServerWebSocket<ClientData>
           cliWs.send(JSON.stringify(msg))
           pendingRequests.delete(msg.id)
@@ -192,6 +210,8 @@ const server = Bun.serve<ClientData>({
           timer,
         })
 
+        const appInfo = apps.get(appSocket)
+        broadcast({ dir: "req", appId: appInfo?.appId, msg: { id: msg.id, type: msg.type, payload: msg.payload } })
         appSocket.send(JSON.stringify({ id: msg.id, type: msg.type, payload: msg.payload }))
       }
     },
@@ -199,6 +219,9 @@ const server = Bun.serve<ClientData>({
     close(ws) {
       if (ws.data.role === "app") {
         cleanupApp(ws)
+      } else if (ws.data.role === "watch") {
+        watchers.delete(ws)
+        log("Watcher disconnected")
       }
     },
   },
