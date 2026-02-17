@@ -30,7 +30,7 @@ export interface HotlineRegister {
   type: "register"
   role: "app"
   appId: string
-  handlers?: HandlerSchema[]
+  handlers: HandlerSchema[]
 }
 
 export type HotlineMessage = HotlineRequest | HotlineResponse | HotlineRegister
