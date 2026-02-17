@@ -10,7 +10,8 @@
     "src"
   ],
   "scripts": {
-    "start": "bun run src/server.ts"
+    "start": "bun run src/server.ts",
+    "test": "bun test"
   },
   "license": "MIT",
   "devDependencies": {
