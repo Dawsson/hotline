@@ -2,6 +2,18 @@
   "name": "@dawsson/hotline",
   "version": "0.3.2",
   "description": "Local WebSocket dev bridge for React Native apps",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dawsson/hotline.git"
+  },
+  "keywords": [
+    "react-native",
+    "websocket",
+    "dev-tools",
+    "ai-agents",
+    "debugging",
+    "cli"
+  ],
   "type": "module",
   "bin": {
     "hotline": "src/cli.ts"

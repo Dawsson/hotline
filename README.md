@@ -1,6 +1,6 @@
 # hotline
 
-Local WebSocket dev bridge for React Native apps. Send commands and query state from CLI tools, test frameworks (Maestro), or AI agents — with multi-app and multi-agent support.
+Local WebSocket dev bridge for React Native apps. Send commands and query state from CLI tools, AI agents, or test frameworks — with multi-app support.
 
 ```
 Agent A ──┐                          ┌── App "com.foo" (Simulator 1)
@@ -10,44 +10,38 @@ Agent C ──┘     (relay server)       └── App "com.foo" (Simulator 3)
 
 Port 8675 — the first four digits of 867-5309.
 
-## Quick Start
+## Install
 
 ```bash
-# Start the server
-hotline start --daemon
-
-# Check what's connected
-hotline status
-
-# Send a command to your app
-hotline cmd ping
-hotline cmd get-state --payload '{"key":"user"}' --app com.example.myapp
-
-# Query shorthand
-hotline query user --app com.example.myapp
-
-# Stop the server
-hotline stop
+bun add @dawsson/hotline
 ```
 
-## React Native Setup
+### As a Claude Code skill
 
 ```bash
-bun add hotline
+npx skills add Dawsson/hotline
 ```
+
+This installs hotline as an agent skill so Claude Code can automatically set it up in your projects.
+
+## App Setup
 
 ```tsx
-import { useHotline } from "hotline/src/client"
+import { useHotline } from "@dawsson/hotline/src/client"
 
 function App() {
   const hotline = useHotline({
     appId: "com.example.myapp",
     handlers: {
-      "get-state": ({ key }) => {
-        return store.getState()[key]
+      "get-state": {
+        handler: ({ key }) => store.getState()[key],
+        fields: [{ name: "key", type: "string", description: "State key" }],
+        description: "Read from app state",
       },
-      "navigate": ({ screen }) => {
-        navigation.navigate(screen)
+      "navigate": {
+        handler: ({ screen }) => navigation.navigate(screen),
+        fields: [{ name: "screen", type: "string", description: "Screen name" }],
+        description: "Navigate to a screen",
       },
     },
   })
@@ -59,79 +53,74 @@ function App() {
 Or without the hook:
 
 ```ts
-import { createHotline } from "hotline/src/client"
+import { createHotline } from "@dawsson/hotline/src/client"
 
 const hotline = createHotline({
   appId: "com.example.myapp",
+  handlers: { /* ... */ },
 })
 
-hotline.handle("get-state", ({ key }) => store.getState()[key])
 hotline.connect()
 ```
 
-The client automatically:
-- Registers with the server using your `appId`
-- Reconnects with exponential backoff (1s → 30s cap)
-- No-ops in production (`__DEV__` guard)
-- Responds to `ping` commands built-in
+The client automatically reconnects with exponential backoff and no-ops in production (`__DEV__` guard).
 
-## CLI Usage
+## CLI
 
 | Command | Description |
 |---------|-------------|
-| `hotline start` | Start server in foreground |
-| `hotline start --daemon` | Start as background process |
-| `hotline stop` | Stop daemonized server |
+| `hotline cmd <type> [--key val]` | Send command to app |
+| `hotline query <key>` | Shorthand for `get-state` |
+| `hotline wait <event>` | Block until app emits event, print payload |
+| `hotline wait-for-app [appId]` | Block until an app connects |
+| `hotline watch` | Interactive TUI (browse apps, commands, live events) |
+| `hotline watch --passive` | Stream-only mode (CI/scripting) |
 | `hotline status` | Show connected apps |
-| `hotline cmd <type> [--payload '{}'] [--app <id>]` | Send command to app |
-| `hotline query <key> [--app <id>]` | Shorthand for `get-state` |
-| `hotline setup [--port N]` | Install macOS launchd service |
+| `hotline start [--daemon]` | Start server (foreground or background) |
+| `hotline stop` | Stop daemonized server |
+| `hotline restart` | Kill and relaunch (picks up new code) |
+| `hotline setup` | Install macOS launchd service |
 | `hotline teardown` | Remove launchd service |
 | `hotline logs` | Tail server log file |
 
-**Flags:** `--port <N>` (default 8675), `--timeout <ms>` (default 5000), `--app <appId>`
+**Flags:** `--port <N>` (default 8675) `--timeout <ms>` (default 5000) `--app <appId>`
 
-**Output:** stdout = JSON data only (pipeable). stderr = logs/errors. Exit 0 = success, 1 = error.
+**Output:** stdout = JSON data only (pipeable). stderr = logs/errors.
 
-## Maestro Integration
+## Handler Format
 
-```yaml
-- runScript:
-    script: |
-      const result = exec("hotline cmd get-state --payload '{\"key\":\"user\"}'")
-      assertTrue(JSON.parse(result).name === "Dawson")
+All handlers use `{ handler, fields, description }` — no bare functions. This lets the TUI and agents discover available commands.
+
+```ts
+"get-state": {
+  handler: ({ key }) => store.getState()[key],
+  fields: [{ name: "key", type: "string", description: "State key" }],
+  description: "Read from app state",
+}
 ```
 
-## Multi-App Routing
+## Events
 
-When multiple apps are connected, use `--app` to target a specific one:
+Apps push events to the server, which broadcasts to all watchers:
 
-```bash
-hotline cmd ping --app com.foo
-hotline cmd get-state --payload '{"key":"auth"}' --app com.bar
+```ts
+hotline.emit("navigation", { screen: "Home" })
+hotline.emit("error", { message: "Something broke" })
 ```
 
-If only one app is connected, `--app` is optional — it auto-selects.
+## Agent Automation
 
-## Lifecycle
+After writing code that triggers a hot reload:
 
 ```bash
-# One-time: install as a launchd service (auto-starts on login)
-hotline setup
-
-# Or run manually
-hotline start --daemon
-
-# View logs
-hotline logs
-
-# Remove the launchd service
-hotline teardown
+hotline wait-for-app                        # block until app reconnects
+hotline wait error --timeout 3000 || true   # check for crashes
+hotline cmd get-state --key currentUser     # verify state
 ```
 
 ## Protocol
 
-JSON over WebSocket. Every request has a unique `id` (UUID).
+JSON over WebSocket. Every request has a unique UUID `id`.
 
 ```jsonc
 // Request (CLI → Server → App)
@@ -139,9 +128,6 @@ JSON over WebSocket. Every request has a unique `id` (UUID).
 
 // Response (App → Server → CLI)
 { "id": "uuid", "ok": true, "data": { "name": "Dawson" } }
-
-// Error
-{ "id": "uuid", "ok": false, "error": "Unknown command: foo" }
 ```
 
 ## License
