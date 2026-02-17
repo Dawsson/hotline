@@ -75,12 +75,6 @@ export async function interactiveWatch(port: number = DEFAULT_PORT) {
     ws.addEventListener("message", (event) => {
       try {
         const data = JSON.parse(String(event.data))
-        const { dir, appId, msg } = data
-
-        // Handle app register/disconnect events to refresh app list
-        if (dir === "req" && (msg.type === "register" || msg.type === "disconnect")) {
-          fetchApps()
-        }
 
         const time = new Date().toLocaleTimeString("en-US", {
           hour12: false,
@@ -88,6 +82,22 @@ export async function interactiveWatch(port: number = DEFAULT_PORT) {
           minute: "2-digit",
           second: "2-digit",
         })
+
+        // Event from app
+        if (data.type === "event") {
+          stream.push({ time, dir: "event" as any, appId: data.appId, msg: { event: data.event, data: data.data } })
+          if (stream.length > MAX_STREAM) stream.shift()
+          render()
+          return
+        }
+
+        const { dir, appId, msg } = data
+
+        // Handle app register/disconnect events to refresh app list
+        if (dir === "req" && (msg.type === "register" || msg.type === "disconnect")) {
+          fetchApps()
+        }
+
         stream.push({ time, dir, appId, msg })
         if (stream.length > MAX_STREAM) stream.shift()
         render()
@@ -249,11 +259,16 @@ export async function interactiveWatch(port: number = DEFAULT_PORT) {
     const time = dim(m.time)
     const app = m.appId ? dim(m.appId) : ""
 
-    if (m.dir === "req") {
+    if ((m.dir as string) === "event") {
+      const arrow = yellow("★")
+      const name = yellow(m.msg.event)
+      const body = m.msg.data != null ? " " + dim(JSON.stringify(m.msg.data)) : ""
+      return truncate(`${time} ${arrow} ${name} ${app}${body}`, cols + 50)
+    } else if (m.dir === "req") {
       const arrow = cyan("▶")
       const type = cyan(m.msg.type)
       const payload = m.msg.payload ? " " + dim(JSON.stringify(m.msg.payload)) : ""
-      return truncate(`${time} ${arrow} ${type} ${app}${payload}`, cols + 50) // extra for ANSI codes
+      return truncate(`${time} ${arrow} ${type} ${app}${payload}`, cols + 50)
     } else {
       const ok = m.msg.ok
       const arrow = ok ? green("◀") : red("◀")

@@ -140,9 +140,36 @@ async function status() {
   }
 }
 
+function collectInlineArgs(startIndex: number): Record<string, unknown> | undefined {
+  const payload: Record<string, unknown> = {}
+  // Skip known global flags
+  const globalFlags = new Set(["port", "timeout", "app", "payload", "passive", "daemon"])
+  for (let i = startIndex; i < args.length; i++) {
+    if (args[i].startsWith("--")) {
+      const key = args[i].slice(2)
+      if (globalFlags.has(key)) { i++; continue }
+      const val = args[i + 1]
+      if (val === undefined || val.startsWith("--")) {
+        payload[key] = true // boolean flag
+      } else {
+        // Auto-coerce numbers and booleans
+        if (val === "true") payload[key] = true
+        else if (val === "false") payload[key] = false
+        else if (/^-?\d+(\.\d+)?$/.test(val)) payload[key] = Number(val)
+        else {
+          // Try JSON parse for objects/arrays
+          try { payload[key] = JSON.parse(val) } catch { payload[key] = val }
+        }
+        i++
+      }
+    }
+  }
+  return Object.keys(payload).length > 0 ? payload : undefined
+}
+
 async function cmd() {
   const type = args[1]
-  if (!type) die("Usage: hotline cmd <type> [--payload '{}'] [--app <id>]")
+  if (!type) die("Usage: hotline cmd <type> [--key value ...] [--payload '{}'] [--app <id>]")
 
   let payload: Record<string, unknown> | undefined
   const payloadStr = flag("payload")
@@ -152,6 +179,8 @@ async function cmd() {
     } catch {
       die("Invalid JSON payload")
     }
+  } else {
+    payload = collectInlineArgs(2)
   }
 
   try {
@@ -210,9 +239,20 @@ async function passiveWatch() {
 
     ws.addEventListener("message", (event) => {
       try {
-        const { dir, appId, msg } = JSON.parse(String(event.data))
+        const data = JSON.parse(String(event.data))
         const time = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
-        const app = appId ? `${dim}${appId}${reset}` : ""
+
+        // Event from app
+        if (data.type === "event") {
+          const yellow = "\x1b[33m"
+          const app = data.appId ? `${dim}${data.appId}${reset}` : ""
+          const body = data.data != null ? ` ${dim}${JSON.stringify(data.data)}${reset}` : ""
+          console.error(`${dim}${time}${reset} ${yellow}★${reset} ${yellow}${data.event}${reset} ${app}${body}`)
+          return
+        }
+
+        const { dir, appId: evAppId, msg } = data
+        const app = evAppId ? `${dim}${evAppId}${reset}` : ""
 
         if (dir === "req") {
           const arrow = `${cyan}▶${reset}`
@@ -241,6 +281,41 @@ async function passiveWatch() {
   })
 }
 
+async function wait() {
+  const event = args[1]
+  if (!event) die("Usage: hotline wait <event> [--timeout <ms>] [--app <id>]")
+
+  const params = new URLSearchParams({ role: "wait", event })
+  if (appId) params.set("app", appId)
+  const url = `ws://localhost:${port}?${params}`
+
+  return new Promise<void>((_, reject) => {
+    const ws = new WebSocket(url)
+    const timer = setTimeout(() => {
+      ws.close()
+      console.error(`Timed out waiting for event: ${event}`)
+      process.exit(1)
+    }, timeout)
+
+    ws.addEventListener("message", (ev) => {
+      clearTimeout(timer)
+      try {
+        const data = JSON.parse(String(ev.data))
+        console.log(JSON.stringify(data.data ?? null))
+      } catch {}
+      ws.close()
+      process.exit(0)
+    })
+
+    ws.addEventListener("error", () => {
+      clearTimeout(timer)
+      reject(new Error(`Cannot connect to hotline server on port ${port}`))
+    })
+
+    ws.addEventListener("close", () => {})
+  })
+}
+
 async function logs() {
   if (!existsSync(LOG_FILE)) die("No log file found.")
   const proc = Bun.spawn(["tail", "-f", LOG_FILE], {
@@ -249,7 +324,7 @@ async function logs() {
   await proc.exited
 }
 
-const COMMANDS = ["status", "start", "stop", "cmd", "query", "watch", "setup", "teardown", "logs"]
+const COMMANDS = ["status", "start", "stop", "cmd", "query", "watch", "wait", "setup", "teardown", "logs"]
 
 function closestCommand(input: string): string | null {
   let best: string | null = null
@@ -292,8 +367,9 @@ Commands:
   start [--daemon]          Start server (foreground or background)
   stop                      Stop daemonized server
   status                    Show connected apps
-  cmd <type> [--payload]    Send command to app
+  cmd <type> [--key val]    Send command to app (inline args or --payload)
   query <key>               Shorthand for get-state command
+  wait <event>              Block until app emits event, print payload
   watch [--passive]         Interactive command browser (--passive for stream only)
   setup [--port N]          Install macOS launchd service
   teardown                  Remove launchd service
@@ -326,6 +402,9 @@ switch (command) {
     break
   case "watch":
     await watch()
+    break
+  case "wait":
+    await wait()
     break
   case "setup":
     await setup(port)
