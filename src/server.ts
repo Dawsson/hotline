@@ -4,6 +4,7 @@ import {
   PID_DIR,
   PID_FILE,
   type AppConnection,
+  type HandlerSchema,
   type HotlineRequest,
   type HotlineResponse,
   type PendingRequest,
@@ -70,6 +71,19 @@ handle("list-apps", () => {
   }
 })
 
+handle("list-handlers", (payload) => {
+  const targetAppId = payload?.appId as string | undefined
+  const result: { appId: string; handlers: HandlerSchema[] }[] = []
+  for (const conn of apps.values()) {
+    if (targetAppId && conn.appId !== targetAppId) continue
+    result.push({
+      appId: conn.appId,
+      handlers: conn.handlers ?? [],
+    })
+  }
+  return result
+})
+
 async function handleServerCommand(
   ws: ServerWebSocket<ClientData>,
   msg: HotlineRequest
@@ -106,6 +120,7 @@ function cleanupApp(ws: ServerWebSocket<ClientData>) {
 
   apps.delete(ws)
   log(`App disconnected: ${info.appId}`)
+  broadcast({ dir: "req", appId: info.appId, msg: { type: "disconnect", appId: info.appId } })
 
   // Fail all pending requests routed to this app
   for (const [id, pending] of pendingRequests) {
@@ -162,9 +177,11 @@ const server = Bun.serve<ClientData>({
       // App registration
       if (msg.type === "register" && msg.role === "app" && msg.appId) {
         ws.data = { role: "app", appId: msg.appId }
-        apps.set(ws, { appId: msg.appId, connectedAt: Date.now() })
-        log(`App registered: ${msg.appId}`)
-        broadcast({ dir: "req", appId: msg.appId, msg: { type: "register", appId: msg.appId } })
+        const conn: AppConnection = { appId: msg.appId, connectedAt: Date.now() }
+        if (msg.handlers) conn.handlers = msg.handlers
+        apps.set(ws, conn)
+        log(`App registered: ${msg.appId}${msg.handlers ? ` (${msg.handlers.length} handlers)` : ""}`)
+        broadcast({ dir: "req", appId: msg.appId, msg: { type: "register", appId: msg.appId, handlers: msg.handlers } })
         return
       }
 

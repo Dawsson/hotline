@@ -1,12 +1,20 @@
 import { DEFAULT_PORT, RECONNECT_CAP_MS } from "./types"
-import type { HotlineRequest, HotlineResponse } from "./types"
+import type { HotlineRequest, HotlineResponse, HandlerField, HandlerSchema } from "./types"
 
 // ── Types ──
+
+export interface HandlerConfig {
+  handler: (payload: any) => any | Promise<any>
+  fields?: HandlerField[]
+  description?: string
+}
+
+type HandlerEntry = ((payload: any) => any | Promise<any>) | HandlerConfig
 
 export interface HotlineOptions {
   port?: number
   appId: string
-  handlers?: Record<string, (payload: any) => any | Promise<any>>
+  handlers?: Record<string, HandlerEntry>
 }
 
 export interface Hotline {
@@ -20,15 +28,25 @@ export interface Hotline {
 export function createHotline(options: HotlineOptions): Hotline {
   const port = options.port ?? DEFAULT_PORT
   const handlers = new Map<string, (payload: any) => any | Promise<any>>()
+  const handlerSchemas: HandlerSchema[] = []
   let ws: WebSocket | null = null
   let reconnectDelay = 1000
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let intentionalClose = false
 
-  // Register initial handlers
+  // Register initial handlers and extract schemas
   if (options.handlers) {
-    for (const [type, fn] of Object.entries(options.handlers)) {
-      handlers.set(type, fn)
+    for (const [type, entry] of Object.entries(options.handlers)) {
+      if (typeof entry === "function") {
+        handlers.set(type, entry)
+      } else {
+        handlers.set(type, entry.handler)
+        handlerSchemas.push({
+          type,
+          description: entry.description,
+          fields: entry.fields,
+        })
+      }
     }
   }
 
@@ -47,11 +65,15 @@ export function createHotline(options: HotlineOptions): Hotline {
     ws.onopen = () => {
       reconnectDelay = 1000
       // Register with server
-      ws!.send(JSON.stringify({
+      const registerMsg: any = {
         type: "register",
         role: "app",
         appId: options.appId,
-      }))
+      }
+      if (handlerSchemas.length > 0) {
+        registerMsg.handlers = handlerSchemas
+      }
+      ws!.send(JSON.stringify(registerMsg))
     }
 
     ws.onmessage = async (event) => {
@@ -123,8 +145,17 @@ export function createHotline(options: HotlineOptions): Hotline {
     ws = null
   }
 
-  function handle(type: string, fn: (payload: any) => any | Promise<any>) {
-    handlers.set(type, fn)
+  function handle(type: string, fn: HandlerEntry) {
+    if (typeof fn === "function") {
+      handlers.set(type, fn)
+    } else {
+      handlers.set(type, fn.handler)
+      // Add schema if not already present
+      const existing = handlerSchemas.findIndex((s) => s.type === type)
+      const schema: HandlerSchema = { type, description: fn.description, fields: fn.fields }
+      if (existing >= 0) handlerSchemas[existing] = schema
+      else handlerSchemas.push(schema)
+    }
   }
 
   return { connect, disconnect, handle }

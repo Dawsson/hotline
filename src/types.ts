@@ -13,10 +13,24 @@ export interface HotlineResponse {
   error?: string
 }
 
+export interface HandlerField {
+  name: string
+  type: "string" | "number" | "boolean" | "json"
+  optional?: boolean
+  description?: string
+}
+
+export interface HandlerSchema {
+  type: string
+  description?: string
+  fields?: HandlerField[]
+}
+
 export interface HotlineRegister {
   type: "register"
   role: "app"
   appId: string
+  handlers?: HandlerSchema[]
 }
 
 export type HotlineMessage = HotlineRequest | HotlineResponse | HotlineRegister
@@ -26,6 +40,7 @@ export type HotlineMessage = HotlineRequest | HotlineResponse | HotlineRegister
 export interface AppConnection {
   appId: string
   connectedAt: number
+  handlers?: HandlerSchema[]
 }
 
 export interface PendingRequest {
