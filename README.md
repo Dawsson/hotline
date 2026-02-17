@@ -2,6 +2,12 @@
 
 Local WebSocket dev bridge for React Native apps. Send commands and query state from CLI tools, AI agents, or test frameworks — with multi-app support.
 
+```bash
+npx skills add Dawsson/hotline
+```
+
+> Installs hotline as an [agent skill](https://skills.sh) — works with Claude Code, Cursor, Windsurf, and other AI agents. Once installed, your agent can automatically integrate hotline into any React Native project.
+
 ```
 Agent A ──┐                          ┌── App "com.foo" (Simulator 1)
 Agent B ──┤── ws://localhost:8675 ──┤── App "com.bar" (Simulator 2)
@@ -15,14 +21,6 @@ Port 8675 — the first four digits of 867-5309.
 ```bash
 bun add @dawsson/hotline
 ```
-
-### As a Claude Code skill
-
-```bash
-npx skills add Dawsson/hotline
-```
-
-This installs hotline as an agent skill so Claude Code can automatically set it up in your projects.
 
 ## App Setup
 
