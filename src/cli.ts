@@ -109,11 +109,29 @@ async function stop() {
   console.error("Server stopped.")
 }
 
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  return `${h}h ${m}m`
+}
+
 async function status() {
   try {
     const res = await wsRequest("list-apps")
     if (res.ok) {
-      console.log(JSON.stringify(res.data, null, 2))
+      const { port: p, pid, uptime, apps } = res.data as any
+      console.error(`Hotline running on port ${p} (pid ${pid}, uptime ${formatUptime(uptime)})`)
+      if (apps.length === 0) {
+        console.error("No apps connected.")
+      } else {
+        console.error(`${apps.length} app${apps.length > 1 ? "s" : ""} connected:`)
+        for (const app of apps) {
+          console.error(`  - ${app.appId}`)
+        }
+      }
+      console.log(JSON.stringify(res.data))
     } else {
       die(res.error || "Unknown error")
     }

@@ -60,7 +60,16 @@ function handleBuiltIn(
       appId: a.appId,
       connectedAt: a.connectedAt,
     }))
-    send(ws, { id: msg.id, ok: true, data: appList })
+    send(ws, {
+      id: msg.id,
+      ok: true,
+      data: {
+        port,
+        pid: process.pid,
+        uptime: Math.floor(process.uptime()),
+        apps: appList,
+      },
+    })
     return true
   }
 
