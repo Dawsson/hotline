@@ -187,6 +187,15 @@ async function query() {
 }
 
 async function watch() {
+  if (hasFlag("passive")) {
+    return passiveWatch()
+  }
+
+  const { interactiveWatch } = await import("./interactive")
+  return interactiveWatch(port)
+}
+
+async function passiveWatch() {
   const url = `ws://localhost:${port}?role=watch`
   const dim = "\x1b[2m"
   const reset = "\x1b[0m"
@@ -285,7 +294,7 @@ Commands:
   status                    Show connected apps
   cmd <type> [--payload]    Send command to app
   query <key>               Shorthand for get-state command
-  watch                     Live stream of all messages
+  watch [--passive]         Interactive command browser (--passive for stream only)
   setup [--port N]          Install macOS launchd service
   teardown                  Remove launchd service
   logs                      Tail server log file
