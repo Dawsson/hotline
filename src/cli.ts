@@ -340,6 +340,70 @@ async function wait() {
   })
 }
 
+async function waitForApp() {
+  const targetApp = appId || args[1]
+  const url = `ws://localhost:${port}?role=watch`
+
+  return new Promise<void>((_, reject) => {
+    const ws = new WebSocket(url)
+    const timer = setTimeout(() => {
+      ws.close()
+      console.error("Timed out waiting for app to connect.")
+      process.exit(1)
+    }, timeout)
+
+    // Check if app is already connected
+    ws.addEventListener("open", () => {
+      const id = crypto.randomUUID()
+      const checkWs = new WebSocket(`ws://localhost:${port}`)
+      checkWs.addEventListener("open", () => {
+        checkWs.send(JSON.stringify({ id, type: "list-apps" }))
+      })
+      checkWs.addEventListener("message", (ev) => {
+        try {
+          const data = JSON.parse(String(ev.data))
+          if (data.id === id && data.ok) {
+            const apps = (data.data as any).apps as { appId: string }[]
+            const match = targetApp
+              ? apps.find((a) => a.appId === targetApp)
+              : apps[0]
+            if (match) {
+              clearTimeout(timer)
+              console.log(JSON.stringify({ appId: match.appId }))
+              ws.close()
+              checkWs.close()
+              process.exit(0)
+            }
+          }
+        } catch {}
+        checkWs.close()
+      })
+      checkWs.addEventListener("error", () => {})
+    })
+
+    // Watch for register events
+    ws.addEventListener("message", (ev) => {
+      try {
+        const data = JSON.parse(String(ev.data))
+        if (data.dir === "req" && data.msg?.type === "register") {
+          const registeredApp = data.msg.appId || data.appId
+          if (!targetApp || registeredApp === targetApp) {
+            clearTimeout(timer)
+            console.log(JSON.stringify({ appId: registeredApp }))
+            ws.close()
+            process.exit(0)
+          }
+        }
+      } catch {}
+    })
+
+    ws.addEventListener("error", () => {
+      clearTimeout(timer)
+      reject(new Error(`Cannot connect to hotline server on port ${port}`))
+    })
+  })
+}
+
 async function logs() {
   if (!existsSync(LOG_FILE)) die("No log file found.")
   const proc = Bun.spawn(["tail", "-f", LOG_FILE], {
@@ -348,7 +412,7 @@ async function logs() {
   await proc.exited
 }
 
-const COMMANDS = ["status", "start", "stop", "restart", "cmd", "query", "watch", "wait", "setup", "teardown", "logs"]
+const COMMANDS = ["status", "start", "stop", "restart", "cmd", "query", "watch", "wait", "wait-for-app", "setup", "teardown", "logs"]
 
 function closestCommand(input: string): string | null {
   let best: string | null = null
@@ -395,6 +459,7 @@ Commands:
   cmd <type> [--key val]    Send command to app (inline args or --payload)
   query <key>               Shorthand for get-state command
   wait <event>              Block until app emits event, print payload
+  wait-for-app [appId]      Block until an app connects
   watch [--passive]         Interactive command browser (--passive for stream only)
   setup [--port N]          Install macOS launchd service
   teardown                  Remove launchd service
@@ -433,6 +498,9 @@ switch (command) {
     break
   case "wait":
     await wait()
+    break
+  case "wait-for-app":
+    await waitForApp()
     break
   case "setup":
     await setup(port)
