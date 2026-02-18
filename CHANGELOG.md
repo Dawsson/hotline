@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.6] - 2026-02-18
+
+- Added `hotline ls` command to list connected app handlers with arg types and descriptions
+
 ## [0.3.5] - 2026-02-17
 
 - Added `-v` as shorthand for `--version`
