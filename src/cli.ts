@@ -3,6 +3,8 @@
 import { DEFAULT_PORT, DEFAULT_TIMEOUT, PID_FILE, LOG_FILE } from "./types"
 import { setup, teardown } from "./launchd"
 import { readFileSync, existsSync } from "fs"
+import { dirname, join } from "path"
+import { fileURLToPath } from "url"
 
 // ── Arg parsing ──
 
@@ -17,6 +19,14 @@ function flag(name: string): string | undefined {
 
 function hasFlag(name: string): boolean {
   return args.includes(`--${name}`)
+}
+
+function getVersion(): string {
+  const __filename = fileURLToPath(import.meta.url)
+  const __dirname = dirname(__filename)
+  const packagePath = join(__dirname, "..", "package.json")
+  const pkg = JSON.parse(readFileSync(packagePath, "utf-8"))
+  return pkg.version
 }
 
 const port = parseInt(flag("port") || "") || DEFAULT_PORT
@@ -456,6 +466,7 @@ Commands:
   logs                      Tail server log file
 
 Flags:
+  --version, -v             Show version
   --port <number>           Server port (default: ${DEFAULT_PORT})
   --timeout <ms>            Request timeout (default: ${DEFAULT_TIMEOUT})
   --app <appId>             Target specific app`)
@@ -463,6 +474,12 @@ Flags:
 }
 
 // ── Main ──
+
+// Handle --version and -v globally
+if (hasFlag("version") || args[0] === "-v" || args[0] === "--version") {
+  console.log(getVersion())
+  process.exit(0)
+}
 
 switch (command) {
   case "start":
