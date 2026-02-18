@@ -476,7 +476,7 @@ Flags:
 // ── Main ──
 
 // Handle --version and -v globally
-if (hasFlag("version") || args[0] === "-v" || args[0] === "--version") {
+if (hasFlag("version") || args.includes("-v") || args.includes("--version")) {
   console.log(getVersion())
   process.exit(0)
 }
