@@ -15,6 +15,7 @@ Local WebSocket dev bridge for React Native apps. Lets CLI tools and AI agents s
 ## Reference Files
 
 - `references/integration.md` — How to add hotline to a React Native / Expo project
+- `references/swift-integration.md` — How to add hotline to a Swift / SwiftUI app (no npm, pure URLSession)
 - `references/handlers.md` — Standard handlers and the handler format
 - `references/agent-usage.md` — CLI commands and automation patterns for AI agents
 - `references/events.md` — Event system for real-time app-to-agent communication
