@@ -74,11 +74,13 @@ interface VideoConfig {
   rawPath: string
   compressedPath: string
   maxBytes: number
+  plannedSeconds?: number
 }
 
 interface VideoCapture {
   proc: Bun.Subprocess<"ignore", "pipe", "pipe">
   rawPath: string
+  mode: "ffmpeg" | "simctl"
 }
 
 type DiscordScreenshotMode = "none" | "failure" | "important"
@@ -222,6 +224,20 @@ async function runBestEffortCommand(cmd: string[], timeoutMs: number): Promise<{
 async function commandExists(binary: string): Promise<boolean> {
   const result = await runBestEffortCommand(["which", binary], 2_000)
   return result.ok && result.out.trim().length > 0
+}
+
+async function getAvfoundationScreenInput(): Promise<string | null> {
+  const probe = await runBestEffortCommand(["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""], 10_000)
+  const text = `${probe.out}\n${probe.err}`
+  const lines = text.split("\n")
+  const screens: number[] = []
+  for (const line of lines) {
+    const match = line.match(/\[(\d+)\]\s+Capture screen\s+\d+/i)
+    if (match) screens.push(Number(match[1]))
+  }
+  if (screens.length === 0) return null
+  const index = screens[screens.length - 1]
+  return `${index}:none`
 }
 
 function fileSizeBytes(path: string): number {
@@ -609,6 +625,29 @@ function parseScript(scriptPath: string): RunScript {
   return payload
 }
 
+function estimateRunSeconds(steps: DeviceStep[]): number {
+  let totalMs = 0
+  for (const step of steps) {
+    const type = String(step.type || "").toLowerCase()
+    switch (type) {
+      case "sleep":
+        totalMs += Number(step.ms || 250)
+        break
+      case "record":
+        totalMs += Math.max(1, Number(step.seconds || 5)) * 1000
+        break
+      case "wait-event":
+        totalMs += 1500
+        break
+      default:
+        totalMs += 900
+        break
+    }
+  }
+  totalMs += 1500
+  return Math.max(3, Math.ceil(totalMs / 1000))
+}
+
 async function postDiscordSummary(
   webhookUrl: string,
   ctx: RunContext,
@@ -686,7 +725,7 @@ function pickDiscordScreenshots(
   return ctx.importantShots.slice(0, 4)
 }
 
-function buildVideoConfig(runDir: string, args: string[], webhook?: string): VideoConfig {
+function buildVideoConfig(runDir: string, args: string[], webhook?: string, plannedSeconds?: number): VideoConfig {
   const enabledByFlag = hasFlag(args, "record-video") || hasFlag(args, "video")
   const disabledByFlag = hasFlag(args, "no-video")
   const enabled = !disabledByFlag && (enabledByFlag || Boolean(webhook))
@@ -699,11 +738,59 @@ function buildVideoConfig(runDir: string, args: string[], webhook?: string): Vid
     rawPath: join(runDir, "run.raw.mp4"),
     compressedPath: join(runDir, "run.mp4"),
     maxBytes,
+    plannedSeconds,
   }
 }
 
 async function startRunVideoCapture(udid: string, config: VideoConfig): Promise<VideoCapture | null> {
   if (!config.enabled) return null
+
+  const hasFfmpeg = await commandExists("ffmpeg")
+  if (hasFfmpeg) {
+    const input = await getAvfoundationScreenInput()
+    if (input) {
+      const planned = Math.max(3, Math.min(300, Math.floor(config.plannedSeconds || 0)))
+      const baseArgs = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "avfoundation",
+        "-framerate",
+        "30",
+        "-i",
+        input,
+      ]
+      const timedArgs = planned > 0 ? [...baseArgs, "-t", String(planned)] : baseArgs
+      const ffmpegProc = Bun.spawn(
+        [
+          ...timedArgs,
+          "-an",
+          "-vf",
+          "scale=1280:-2",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "ultrafast",
+          "-crf",
+          "35",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          config.rawPath,
+        ],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+          stdin: "ignore",
+        }
+      )
+      await sleep(500)
+      if (ffmpegProc.exitCode == null) {
+        return { proc: ffmpegProc, rawPath: config.rawPath, mode: "ffmpeg" }
+      }
+    }
+  }
 
   const proc = Bun.spawn(
     ["xcrun", "simctl", "io", udid, "recordVideo", "--codec=h264", "--force", config.rawPath],
@@ -714,11 +801,18 @@ async function startRunVideoCapture(udid: string, config: VideoConfig): Promise<
   )
 
   await sleep(250)
-  return { proc, rawPath: config.rawPath }
+  return { proc, rawPath: config.rawPath, mode: "simctl" }
 }
 
 async function stopRunVideoCapture(capture: VideoCapture | null): Promise<void> {
   if (!capture) return
+  if (capture.mode === "ffmpeg") {
+    const done = await Promise.race([
+      capture.proc.exited.then(() => true),
+      sleep(6_000).then(() => false),
+    ])
+    if (done) return
+  }
   try {
     capture.proc.kill("SIGINT")
   } catch {}
@@ -1023,7 +1117,7 @@ async function runScript(args: string[], globals: DeviceGlobals) {
   const runId = formatNow()
   const runDir = join(runsDir, agent, runId)
   ensureDir(runDir)
-  const videoConfig = buildVideoConfig(runDir, args, webhook)
+  const videoConfig = buildVideoConfig(runDir, args, webhook, estimateRunSeconds(script.steps))
 
   const ctx: RunContext = {
     agent,
