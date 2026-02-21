@@ -55,6 +55,7 @@ interface RunContext {
   startMs: number
   port: number
   defaultTimeoutMs: number
+  allowMouseFallback: boolean
   importantShots: { path: string; reason: string }[]
   steps: Array<{
     index: number
@@ -75,12 +76,13 @@ interface VideoConfig {
   compressedPath: string
   maxBytes: number
   plannedSeconds?: number
+  source: "simulator" | "screen"
 }
 
 interface VideoCapture {
   proc: Bun.Subprocess<"ignore", "pipe", "pipe">
   rawPath: string
-  mode: "ffmpeg" | "simctl"
+  mode: "ffmpeg" | "simctl-timed"
 }
 
 type DiscordScreenshotMode = "none" | "failure" | "important"
@@ -446,6 +448,10 @@ async function clickWithFallback(udid: string, x: number, y: number, timeoutMs: 
   const simctl = await runBestEffortCommand(["xcrun", "simctl", "io", udid, "tap", String(x), String(y)], timeoutMs)
   if (simctl.ok) return
 
+  throw new Error("Touch tap unavailable via simctl on this Xcode build (mouse fallback disabled).")
+}
+
+async function clickWithMouseFallback(udid: string, x: number, y: number, timeoutMs: number) {
   await activateSimulator()
   const mapped = await mapDeviceToScreen(udid, x, y)
   await runCommand(["cliclick", `c:${mapped.x},${mapped.y}`], timeoutMs)
@@ -465,6 +471,17 @@ async function swipeWithFallback(
   )
   if (simctl.ok) return
 
+  throw new Error("Touch swipe unavailable via simctl on this Xcode build (mouse fallback disabled).")
+}
+
+async function swipeWithMouseFallback(
+  udid: string,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  timeoutMs: number
+) {
   await activateSimulator()
   const start = await mapDeviceToScreen(udid, x1, y1)
   const end = await mapDeviceToScreen(udid, x2, y2)
@@ -475,6 +492,10 @@ async function typeWithFallback(udid: string, text: string, timeoutMs: number) {
   const simctl = await runBestEffortCommand(["xcrun", "simctl", "io", udid, "text", text], timeoutMs)
   if (simctl.ok) return
 
+  throw new Error("Touch text input unavailable via simctl on this Xcode build (mouse fallback disabled).")
+}
+
+async function typeWithMouseFallback(udid: string, text: string, timeoutMs: number) {
   await activateSimulator()
   await runCommand(["cliclick", `t:${text}`], timeoutMs)
 }
@@ -505,12 +526,14 @@ async function executeStep(ctx: RunContext, step: DeviceStep, index: number) {
       case "tap": {
         const x = toNumber(step.x, "x")
         const y = toNumber(step.y, "y")
-        await clickWithFallback(ctx.udid, x, y, timeoutMs)
+        if (ctx.allowMouseFallback) await clickWithMouseFallback(ctx.udid, x, y, timeoutMs)
+        else await clickWithFallback(ctx.udid, x, y, timeoutMs)
         break
       }
       case "type": {
         const text = String(step.text ?? "")
-        await typeWithFallback(ctx.udid, text, timeoutMs)
+        if (ctx.allowMouseFallback) await typeWithMouseFallback(ctx.udid, text, timeoutMs)
+        else await typeWithFallback(ctx.udid, text, timeoutMs)
         break
       }
       case "swipe":
@@ -519,7 +542,8 @@ async function executeStep(ctx: RunContext, step: DeviceStep, index: number) {
         const y1 = toNumber(step.y1, "y1")
         const x2 = toNumber(step.x2, "x2")
         const y2 = toNumber(step.y2, "y2")
-        await swipeWithFallback(ctx.udid, x1, y1, x2, y2, timeoutMs)
+        if (ctx.allowMouseFallback) await swipeWithMouseFallback(ctx.udid, x1, y1, x2, y2, timeoutMs)
+        else await swipeWithFallback(ctx.udid, x1, y1, x2, y2, timeoutMs)
         break
       }
       case "launch": {
@@ -733,23 +757,44 @@ function buildVideoConfig(runDir: string, args: string[], webhook?: string, plan
   const maxBytes = Number.isFinite(maxVideoMb) && maxVideoMb > 0
     ? Math.floor(maxVideoMb * 1024 * 1024)
     : DEFAULT_MAX_VIDEO_BYTES
+  const sourceFlag = (parseFlag(args, "video-source") || "screen").toLowerCase()
+  const source: "simulator" | "screen" = sourceFlag === "screen" ? "screen" : "simulator"
   return {
     enabled,
     rawPath: join(runDir, "run.raw.mp4"),
     compressedPath: join(runDir, "run.mp4"),
     maxBytes,
     plannedSeconds,
+    source,
   }
 }
 
 async function startRunVideoCapture(udid: string, config: VideoConfig): Promise<VideoCapture | null> {
   if (!config.enabled) return null
 
+  const planned = Math.max(3, Math.min(300, Math.floor(config.plannedSeconds || 10)))
+  if (config.source === "simulator") {
+    const quotedOut = `'${config.rawPath.replace(/'/g, `'\"'\"'`)}'`
+    const script = [
+      `xcrun simctl io ${udid} recordVideo --display=internal --codec=h264 --force ${quotedOut} &`,
+      "pid=$!",
+      `sleep ${planned}`,
+      "kill -INT $pid || true",
+      "wait $pid || true",
+    ].join("; ")
+    const simProc = Bun.spawn(["bash", "-lc", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    })
+    await sleep(300)
+    return { proc: simProc, rawPath: config.rawPath, mode: "simctl-timed" }
+  }
+
   const hasFfmpeg = await commandExists("ffmpeg")
   if (hasFfmpeg) {
     const input = await getAvfoundationScreenInput()
     if (input) {
-      const planned = Math.max(3, Math.min(300, Math.floor(config.plannedSeconds || 0)))
       const baseArgs = [
         "ffmpeg",
         "-y",
@@ -791,22 +836,12 @@ async function startRunVideoCapture(udid: string, config: VideoConfig): Promise<
       }
     }
   }
-
-  const proc = Bun.spawn(
-    ["xcrun", "simctl", "io", udid, "recordVideo", "--codec=h264", "--force", config.rawPath],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  )
-
-  await sleep(250)
-  return { proc, rawPath: config.rawPath, mode: "simctl" }
+  return null
 }
 
 async function stopRunVideoCapture(capture: VideoCapture | null): Promise<void> {
   if (!capture) return
-  if (capture.mode === "ffmpeg") {
+  if (capture.mode === "ffmpeg" || capture.mode === "simctl-timed") {
     const done = await Promise.race([
       capture.proc.exited.then(() => true),
       sleep(6_000).then(() => false),
@@ -1016,6 +1051,7 @@ async function runAct(args: string[], globals: DeviceGlobals) {
   const runId = formatNow()
   const runDir = join(parseFlag(args, "runs-dir") || DEFAULT_RUNS_DIR, agent, runId)
   ensureDir(runDir)
+  const allowMouseFallback = hasFlag(args, "allow-mouse-fallback")
 
   const ctx: RunContext = {
     agent,
@@ -1027,6 +1063,7 @@ async function runAct(args: string[], globals: DeviceGlobals) {
     startMs: Date.now(),
     port: globals.port,
     defaultTimeoutMs: globals.timeout,
+    allowMouseFallback,
     importantShots: [],
     steps: [],
   }
@@ -1109,6 +1146,7 @@ async function runScript(args: string[], globals: DeviceGlobals) {
   const similarity = Number(parseFlag(args, "issue-threshold") || "0.82")
   const defaultTimeoutMs = Number(parseFlag(args, "action-timeout") || String(globals.timeout))
   const discordScreenshotMode = parseDiscordScreenshotMode(args)
+  const allowMouseFallback = hasFlag(args, "allow-mouse-fallback")
 
   const script = parseScript(scriptPath)
   const udid = await resolveUdid(args, globals.timeout)
@@ -1129,6 +1167,7 @@ async function runScript(args: string[], globals: DeviceGlobals) {
     startMs: Date.now(),
     port: globals.port,
     defaultTimeoutMs,
+    allowMouseFallback,
     importantShots: [],
     steps: [],
   }
@@ -1254,7 +1293,8 @@ Commands:
   hotline device status
   hotline device acquire --agent <id> [--udid <udid>] [--timeout <ms>]
   hotline device release [--agent <id>]
-  hotline device run --agent <id> --script <steps.json> [--discord-webhook <url>] [--video|--record-video] [--max-video-mb <n>] [--discord-screenshots <none|failure|important>]
+  hotline device run --agent <id> --script <steps.json> [--discord-webhook <url>] [--video|--record-video] [--video-source <screen|simulator>] [--max-video-mb <n>] [--discord-screenshots <none|failure|important>]
+    (touch actions are simctl-only by default; pass --allow-mouse-fallback to opt in)
   hotline device act <action> --agent <id> [action flags]
   hotline device simctl --agent <id> -- <simctl args>
 
