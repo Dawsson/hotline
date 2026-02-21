@@ -2,6 +2,7 @@
 
 import { DEFAULT_PORT, DEFAULT_TIMEOUT, PID_FILE, LOG_FILE, type HandlerSchema } from "./types"
 import { setup, teardown } from "./launchd"
+import { runDeviceCommand } from "./device"
 import { readFileSync, existsSync } from "fs"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
@@ -451,7 +452,7 @@ async function logs() {
   await proc.exited
 }
 
-const COMMANDS = ["status", "start", "stop", "restart", "cmd", "query", "ls", "watch", "wait", "wait-for-app", "setup", "teardown", "logs"]
+const COMMANDS = ["status", "start", "stop", "restart", "cmd", "query", "ls", "watch", "wait", "wait-for-app", "setup", "teardown", "logs", "device"]
 
 function closestCommand(input: string): string | null {
   let best: string | null = null
@@ -504,6 +505,7 @@ Commands:
   setup [--port N]          Install macOS launchd service
   teardown                  Remove launchd service
   logs                      Tail server log file
+  device <subcommand>       Serialized iOS simulator actions for agents
 
 Flags:
   --version, -v             Show version
@@ -557,6 +559,9 @@ switch (command) {
     break
   case "teardown":
     await teardown()
+    break
+  case "device":
+    await runDeviceCommand(args.slice(1), { port, timeout, appId })
     break
   case "logs":
     await logs()
