@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs"
 import { basename, join } from "path"
+import { runXctestCommand } from "./xctest-driver"
 
 interface DeviceGlobals {
   port: number
@@ -444,11 +445,11 @@ async function mapDeviceToScreen(udid: string, x: number, y: number): Promise<{ 
   }
 }
 
-async function clickWithFallback(udid: string, x: number, y: number, timeoutMs: number) {
+async function clickWithFallback(udid: string, x: number, y: number, timeoutMs: number, appBundleId?: string) {
   const simctl = await runBestEffortCommand(["xcrun", "simctl", "io", udid, "tap", String(x), String(y)], timeoutMs)
   if (simctl.ok) return
 
-  throw new Error("Touch tap unavailable via simctl on this Xcode build (mouse fallback disabled).")
+  await runXctestCommand(udid, { command: "tap", x, y, appBundleId })
 }
 
 async function clickWithMouseFallback(udid: string, x: number, y: number, timeoutMs: number) {
@@ -463,7 +464,8 @@ async function swipeWithFallback(
   y1: number,
   x2: number,
   y2: number,
-  timeoutMs: number
+  timeoutMs: number,
+  appBundleId?: string
 ) {
   const simctl = await runBestEffortCommand(
     ["xcrun", "simctl", "io", udid, "swipe", String(x1), String(y1), String(x2), String(y2)],
@@ -471,7 +473,7 @@ async function swipeWithFallback(
   )
   if (simctl.ok) return
 
-  throw new Error("Touch swipe unavailable via simctl on this Xcode build (mouse fallback disabled).")
+  await runXctestCommand(udid, { command: "drag", x: x1, y: y1, x2, y2, durationMs: 120, appBundleId })
 }
 
 async function swipeWithMouseFallback(
@@ -488,11 +490,11 @@ async function swipeWithMouseFallback(
   await runCommand(["cliclick", `dd:${start.x},${start.y}`, "w:120", `du:${end.x},${end.y}`], timeoutMs)
 }
 
-async function typeWithFallback(udid: string, text: string, timeoutMs: number) {
+async function typeWithFallback(udid: string, text: string, timeoutMs: number, appBundleId?: string) {
   const simctl = await runBestEffortCommand(["xcrun", "simctl", "io", udid, "text", text], timeoutMs)
   if (simctl.ok) return
 
-  throw new Error("Touch text input unavailable via simctl on this Xcode build (mouse fallback disabled).")
+  await runXctestCommand(udid, { command: "type", text, appBundleId })
 }
 
 async function typeWithMouseFallback(udid: string, text: string, timeoutMs: number) {
@@ -527,13 +529,13 @@ async function executeStep(ctx: RunContext, step: DeviceStep, index: number) {
         const x = toNumber(step.x, "x")
         const y = toNumber(step.y, "y")
         if (ctx.allowMouseFallback) await clickWithMouseFallback(ctx.udid, x, y, timeoutMs)
-        else await clickWithFallback(ctx.udid, x, y, timeoutMs)
+        else await clickWithFallback(ctx.udid, x, y, timeoutMs, ctx.bundleId)
         break
       }
       case "type": {
         const text = String(step.text ?? "")
         if (ctx.allowMouseFallback) await typeWithMouseFallback(ctx.udid, text, timeoutMs)
-        else await typeWithFallback(ctx.udid, text, timeoutMs)
+        else await typeWithFallback(ctx.udid, text, timeoutMs, ctx.bundleId)
         break
       }
       case "swipe":
@@ -543,7 +545,7 @@ async function executeStep(ctx: RunContext, step: DeviceStep, index: number) {
         const x2 = toNumber(step.x2, "x2")
         const y2 = toNumber(step.y2, "y2")
         if (ctx.allowMouseFallback) await swipeWithMouseFallback(ctx.udid, x1, y1, x2, y2, timeoutMs)
-        else await swipeWithFallback(ctx.udid, x1, y1, x2, y2, timeoutMs)
+        else await swipeWithFallback(ctx.udid, x1, y1, x2, y2, timeoutMs, ctx.bundleId)
         break
       }
       case "launch": {
