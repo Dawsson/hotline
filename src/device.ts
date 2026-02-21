@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs"
 import { basename, join } from "path"
 
 interface DeviceGlobals {
@@ -73,12 +73,15 @@ interface VideoConfig {
   enabled: boolean
   rawPath: string
   compressedPath: string
+  maxBytes: number
 }
 
 interface VideoCapture {
   proc: Bun.Subprocess<"ignore", "pipe", "pipe">
   rawPath: string
 }
+
+type DiscordScreenshotMode = "none" | "failure" | "important"
 
 const DEVICE_HOME = join(process.env.HOME || ".", ".hotline", "device")
 const QUEUE_DIR = join(DEVICE_HOME, "queue")
@@ -87,6 +90,7 @@ const INDEX_FILE = join(DEVICE_HOME, "issue-index.json")
 
 const DEFAULT_RUNS_DIR = join(process.cwd(), "runs")
 const DEFAULT_ISSUES_DIR = join(process.cwd(), "issues")
+const DEFAULT_MAX_VIDEO_BYTES = 24 * 1024 * 1024
 
 function parseFlag(args: string[], name: string): string | undefined {
   const i = args.indexOf(`--${name}`)
@@ -218,6 +222,28 @@ async function runBestEffortCommand(cmd: string[], timeoutMs: number): Promise<{
 async function commandExists(binary: string): Promise<boolean> {
   const result = await runBestEffortCommand(["which", binary], 2_000)
   return result.ok && result.out.trim().length > 0
+}
+
+function fileSizeBytes(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    return 0
+  }
+}
+
+async function getVideoDurationSec(path: string): Promise<number | null> {
+  const hasFfprobe = await commandExists("ffprobe")
+  if (!hasFfprobe) return null
+
+  const res = await runBestEffortCommand(
+    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nokey=1:noprint_wrappers=1", path],
+    10_000
+  )
+  if (!res.ok) return null
+  const duration = Number(res.out.trim())
+  if (!Number.isFinite(duration) || duration <= 0) return null
+  return duration
 }
 
 async function getBootedUdid(timeoutMs: number): Promise<string> {
@@ -588,15 +614,15 @@ async function postDiscordSummary(
   ctx: RunContext,
   ok: boolean,
   message: string,
-  videoPath?: string
+  videoPath?: string,
+  screenshots: Array<{ path: string; reason: string }> = []
 ) {
-  const selected = ctx.importantShots.slice(0, 4)
   const embeds: Array<Record<string, unknown>> = []
   const form = new FormData()
   let fileIndex = 0
 
-  for (let i = 0; i < selected.length; i++) {
-    const item = selected[i]
+  for (let i = 0; i < screenshots.length; i++) {
+    const item = screenshots[i]
     const fileName = basename(item.path)
     form.set(`files[${fileIndex}]`, Bun.file(item.path), fileName)
     embeds.push({
@@ -639,14 +665,40 @@ async function postDiscordSummary(
   }
 }
 
+function parseDiscordScreenshotMode(args: string[]): DiscordScreenshotMode {
+  const mode = parseFlag(args, "discord-screenshots")
+  if (!mode) return "failure"
+  const normalized = mode.trim().toLowerCase()
+  if (normalized === "none" || normalized === "failure" || normalized === "important") {
+    return normalized as DiscordScreenshotMode
+  }
+  throw new Error("Invalid --discord-screenshots. Use: none | failure | important")
+}
+
+function pickDiscordScreenshots(
+  ctx: RunContext,
+  mode: DiscordScreenshotMode,
+  ok: boolean
+): Array<{ path: string; reason: string }> {
+  if (mode === "none") return []
+  if (mode === "important") return ctx.importantShots.slice(0, 4)
+  if (ok) return []
+  return ctx.importantShots.slice(0, 4)
+}
+
 function buildVideoConfig(runDir: string, args: string[], webhook?: string): VideoConfig {
   const enabledByFlag = hasFlag(args, "record-video") || hasFlag(args, "video")
   const disabledByFlag = hasFlag(args, "no-video")
   const enabled = !disabledByFlag && (enabledByFlag || Boolean(webhook))
+  const maxVideoMb = Number(parseFlag(args, "max-video-mb") || "24")
+  const maxBytes = Number.isFinite(maxVideoMb) && maxVideoMb > 0
+    ? Math.floor(maxVideoMb * 1024 * 1024)
+    : DEFAULT_MAX_VIDEO_BYTES
   return {
     enabled,
     rawPath: join(runDir, "run.raw.mp4"),
     compressedPath: join(runDir, "run.mp4"),
+    maxBytes,
   }
 }
 
@@ -673,12 +725,70 @@ async function stopRunVideoCapture(capture: VideoCapture | null): Promise<void> 
   await capture.proc.exited
 }
 
-async function compressVideoFast(rawPath: string, outputPath: string): Promise<string | null> {
+async function compressVideoFast(rawPath: string, outputPath: string, maxBytes: number): Promise<string | null> {
   if (!existsSync(rawPath)) return null
   const hasFfmpeg = await commandExists("ffmpeg")
   if (!hasFfmpeg) return rawPath
 
-  const compression = await runBestEffortCommand(
+  const duration = await getVideoDurationSec(rawPath)
+  const safeBudgetBytes = Math.floor(maxBytes * 0.9)
+  const targetBitrateKbps = duration
+    ? Math.max(220, Math.floor((safeBudgetBytes * 8) / duration / 1000))
+    : 1200
+
+  const attempts: Array<{ scale: string; crf: string; bitrateKbps: number }> = [
+    { scale: "trunc(iw*0.75/2)*2:trunc(ih*0.75/2)*2", crf: "33", bitrateKbps: targetBitrateKbps },
+    { scale: "trunc(iw*0.6/2)*2:trunc(ih*0.6/2)*2", crf: "36", bitrateKbps: Math.max(180, Math.floor(targetBitrateKbps * 0.75)) },
+    { scale: "trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2", crf: "38", bitrateKbps: Math.max(150, Math.floor(targetBitrateKbps * 0.6)) },
+  ]
+
+  let bestPath: string | null = null
+  let bestSize = Number.POSITIVE_INFINITY
+
+  for (const attempt of attempts) {
+    const res = await runBestEffortCommand(
+      [
+        "ffmpeg",
+        "-y",
+        "-i",
+        rawPath,
+        "-an",
+        "-r",
+        "30",
+        "-vf",
+        attempt.scale,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        attempt.crf,
+        "-b:v",
+        `${attempt.bitrateKbps}k`,
+        "-maxrate",
+        `${attempt.bitrateKbps}k`,
+        "-bufsize",
+        `${Math.max(300, attempt.bitrateKbps * 2)}k`,
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ],
+      120_000
+    )
+
+    if (!res.ok || !existsSync(outputPath)) continue
+    const size = fileSizeBytes(outputPath)
+    if (size > 0 && size < bestSize) {
+      bestPath = outputPath
+      bestSize = size
+    }
+    if (size > 0 && size <= maxBytes) {
+      return outputPath
+    }
+  }
+
+  // Final fallback: keep 30fps, simple transform for maximum compatibility.
+  const fallback = await runBestEffortCommand(
     [
       "ffmpeg",
       "-y",
@@ -686,9 +796,7 @@ async function compressVideoFast(rawPath: string, outputPath: string): Promise<s
       rawPath,
       "-an",
       "-r",
-      "12",
-      "-vf",
-      "scale=trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2",
+      "30",
       "-c:v",
       "libx264",
       "-preset",
@@ -702,8 +810,17 @@ async function compressVideoFast(rawPath: string, outputPath: string): Promise<s
     120_000
   )
 
-  if (!compression.ok || !existsSync(outputPath)) return rawPath
-  return outputPath
+  if (fallback.ok && existsSync(outputPath)) {
+    const size = fileSizeBytes(outputPath)
+    if (size > 0 && size <= maxBytes) return outputPath
+    if (size > 0 && size < bestSize) {
+      bestPath = outputPath
+      bestSize = size
+    }
+  }
+
+  if (bestPath && bestSize <= fileSizeBytes(rawPath)) return bestPath
+  return rawPath
 }
 
 async function acquireLock(agent: string, udid: string, timeoutMs: number): Promise<{ ticketId: string }> {
@@ -897,6 +1014,7 @@ async function runScript(args: string[], globals: DeviceGlobals) {
   const webhook = parseFlag(args, "discord-webhook") || process.env.HOTLINE_DEVICE_DISCORD_WEBHOOK
   const similarity = Number(parseFlag(args, "issue-threshold") || "0.82")
   const defaultTimeoutMs = Number(parseFlag(args, "action-timeout") || String(globals.timeout))
+  const discordScreenshotMode = parseDiscordScreenshotMode(args)
 
   const script = parseScript(scriptPath)
   const udid = await resolveUdid(args, globals.timeout)
@@ -936,7 +1054,11 @@ async function runScript(args: string[], globals: DeviceGlobals) {
     markImportant(ctx, finalShot, "final success")
     await stopRunVideoCapture(videoCapture)
     videoCapture = null
-    videoForWebhook = await compressVideoFast(videoConfig.rawPath, videoConfig.compressedPath)
+    videoForWebhook = await compressVideoFast(videoConfig.rawPath, videoConfig.compressedPath, videoConfig.maxBytes)
+    if (videoForWebhook && fileSizeBytes(videoForWebhook) > videoConfig.maxBytes) {
+      summary = `${summary}\nVideo omitted from webhook (size over ${Math.floor(videoConfig.maxBytes / 1024 / 1024)}MB limit).`
+      videoForWebhook = null
+    }
 
     const output = {
       ok: true,
@@ -951,14 +1073,19 @@ async function runScript(args: string[], globals: DeviceGlobals) {
     writeFileSync(join(runDir, "run.json"), `${JSON.stringify(output, null, 2)}\n`)
 
     if (webhook) {
-      await postDiscordSummary(webhook, ctx, true, summary, videoForWebhook || undefined)
+      const screenshots = pickDiscordScreenshots(ctx, discordScreenshotMode, true)
+      await postDiscordSummary(webhook, ctx, true, summary, videoForWebhook || undefined, screenshots)
     }
 
     console.log(JSON.stringify(output, null, 2))
   } catch (error: any) {
     await stopRunVideoCapture(videoCapture)
     videoCapture = null
-    videoForWebhook = await compressVideoFast(videoConfig.rawPath, videoConfig.compressedPath)
+    videoForWebhook = await compressVideoFast(videoConfig.rawPath, videoConfig.compressedPath, videoConfig.maxBytes)
+    if (videoForWebhook && fileSizeBytes(videoForWebhook) > videoConfig.maxBytes) {
+      summary = `${summary}\nVideo omitted from webhook (size over ${Math.floor(videoConfig.maxBytes / 1024 / 1024)}MB limit).`
+      videoForWebhook = null
+    }
 
     const message = error?.message || String(error)
     const stepFailure = ctx.steps.find((step) => !step.ok)
@@ -995,7 +1122,8 @@ async function runScript(args: string[], globals: DeviceGlobals) {
     writeFileSync(join(runDir, "run.json"), `${JSON.stringify(output, null, 2)}\n`)
 
     if (webhook) {
-      await postDiscordSummary(webhook, ctx, false, `${summary}\nError: ${message}`, videoForWebhook || undefined)
+      const screenshots = pickDiscordScreenshots(ctx, discordScreenshotMode, false)
+      await postDiscordSummary(webhook, ctx, false, `${summary}\nError: ${message}`, videoForWebhook || undefined, screenshots)
     }
 
     console.log(JSON.stringify(output, null, 2))
@@ -1032,7 +1160,7 @@ Commands:
   hotline device status
   hotline device acquire --agent <id> [--udid <udid>] [--timeout <ms>]
   hotline device release [--agent <id>]
-  hotline device run --agent <id> --script <steps.json> [--discord-webhook <url>] [--video|--record-video]
+  hotline device run --agent <id> --script <steps.json> [--discord-webhook <url>] [--video|--record-video] [--max-video-mb <n>] [--discord-screenshots <none|failure|important>]
   hotline device act <action> --agent <id> [action flags]
   hotline device simctl --agent <id> -- <simctl args>
 

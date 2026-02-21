@@ -96,4 +96,4 @@ hotline device act tap --agent agent-1 --x 320 --y 640
 hotline device simctl --agent agent-1 -- ui booted appearance dark
 ```
 
-`hotline device run` captures screenshots after each step and can auto-record/compress/send a run video when a webhook is set.
+`hotline device run` captures screenshots after each step and auto-records/compresses/sends a run video when a webhook is set. Discord screenshot uploads default to failure-only.

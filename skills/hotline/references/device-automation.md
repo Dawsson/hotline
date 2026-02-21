@@ -27,13 +27,19 @@ hotline device simctl --agent <id> -- <simctl args>
 - Auto-enabled when `--discord-webhook` is provided
 - Or force with `--record-video` / `--video`
 - Disable with `--no-video`
-- Video is compressed for speed (`ffmpeg` ultrafast + low quality) when available
+- Video is compressed for speed (`ffmpeg` ultrafast) at `30 FPS`
+- Webhook upload is size-limited (default `24MB` safety budget for Discord's `25MB` cap)
+- Override cap with `--max-video-mb <n>`
+- Screenshot uploads default to `failure` mode (none on success, important shots on failure)
+- Override with `--discord-screenshots none|failure|important`
 
 ```bash
 hotline device run \
   --agent qa-1 \
   --script ./steps.json \
-  --discord-webhook "$DISCORD_WEBHOOK"
+  --discord-webhook "$DISCORD_WEBHOOK" \
+  --max-video-mb 24 \
+  --discord-screenshots failure
 ```
 
 ## Steps JSON
