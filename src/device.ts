@@ -69,6 +69,17 @@ interface RunContext {
   }>
 }
 
+interface VideoConfig {
+  enabled: boolean
+  rawPath: string
+  compressedPath: string
+}
+
+interface VideoCapture {
+  proc: Bun.Subprocess<"ignore", "pipe", "pipe">
+  rawPath: string
+}
+
 const DEVICE_HOME = join(process.env.HOME || ".", ".hotline", "device")
 const QUEUE_DIR = join(DEVICE_HOME, "queue")
 const LOCK_DIR = join(DEVICE_HOME, "lock")
@@ -202,6 +213,11 @@ async function runBestEffortCommand(cmd: string[], timeoutMs: number): Promise<{
   } catch (error: any) {
     return { ok: false, out: "", err: error?.message || String(error) }
   }
+}
+
+async function commandExists(binary: string): Promise<boolean> {
+  const result = await runBestEffortCommand(["which", binary], 2_000)
+  return result.ok && result.out.trim().length > 0
 }
 
 async function getBootedUdid(timeoutMs: number): Promise<string> {
@@ -567,20 +583,33 @@ function parseScript(scriptPath: string): RunScript {
   return payload
 }
 
-async function postDiscordSummary(webhookUrl: string, ctx: RunContext, ok: boolean, message: string) {
+async function postDiscordSummary(
+  webhookUrl: string,
+  ctx: RunContext,
+  ok: boolean,
+  message: string,
+  videoPath?: string
+) {
   const selected = ctx.importantShots.slice(0, 4)
   const embeds: Array<Record<string, unknown>> = []
   const form = new FormData()
+  let fileIndex = 0
 
   for (let i = 0; i < selected.length; i++) {
     const item = selected[i]
     const fileName = basename(item.path)
-    form.set(`files[${i}]`, Bun.file(item.path), fileName)
+    form.set(`files[${fileIndex}]`, Bun.file(item.path), fileName)
     embeds.push({
       title: `Screenshot ${i + 1}`,
       description: item.reason,
       image: { url: `attachment://${fileName}` },
     })
+    fileIndex += 1
+  }
+
+  if (videoPath && existsSync(videoPath)) {
+    const fileName = basename(videoPath)
+    form.set(`files[${fileIndex}]`, Bun.file(videoPath), fileName)
   }
 
   const content = `${ok ? "PASS" : "FAIL"} agent=${ctx.agent} run=${ctx.runId} steps=${ctx.steps.length}`
@@ -608,6 +637,73 @@ async function postDiscordSummary(webhookUrl: string, ctx: RunContext, ok: boole
     const text = await res.text()
     throw new Error(`Discord webhook failed (${res.status}): ${text}`)
   }
+}
+
+function buildVideoConfig(runDir: string, args: string[], webhook?: string): VideoConfig {
+  const enabledByFlag = hasFlag(args, "record-video") || hasFlag(args, "video")
+  const disabledByFlag = hasFlag(args, "no-video")
+  const enabled = !disabledByFlag && (enabledByFlag || Boolean(webhook))
+  return {
+    enabled,
+    rawPath: join(runDir, "run.raw.mp4"),
+    compressedPath: join(runDir, "run.mp4"),
+  }
+}
+
+async function startRunVideoCapture(udid: string, config: VideoConfig): Promise<VideoCapture | null> {
+  if (!config.enabled) return null
+
+  const proc = Bun.spawn(
+    ["xcrun", "simctl", "io", udid, "recordVideo", "--codec=h264", "--force", config.rawPath],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  )
+
+  await sleep(250)
+  return { proc, rawPath: config.rawPath }
+}
+
+async function stopRunVideoCapture(capture: VideoCapture | null): Promise<void> {
+  if (!capture) return
+  try {
+    capture.proc.kill("SIGINT")
+  } catch {}
+  await capture.proc.exited
+}
+
+async function compressVideoFast(rawPath: string, outputPath: string): Promise<string | null> {
+  if (!existsSync(rawPath)) return null
+  const hasFfmpeg = await commandExists("ffmpeg")
+  if (!hasFfmpeg) return rawPath
+
+  const compression = await runBestEffortCommand(
+    [
+      "ffmpeg",
+      "-y",
+      "-i",
+      rawPath,
+      "-an",
+      "-r",
+      "12",
+      "-vf",
+      "scale=trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "38",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ],
+    120_000
+  )
+
+  if (!compression.ok || !existsSync(outputPath)) return rawPath
+  return outputPath
 }
 
 async function acquireLock(agent: string, udid: string, timeoutMs: number): Promise<{ ticketId: string }> {
@@ -809,6 +905,7 @@ async function runScript(args: string[], globals: DeviceGlobals) {
   const runId = formatNow()
   const runDir = join(runsDir, agent, runId)
   ensureDir(runDir)
+  const videoConfig = buildVideoConfig(runDir, args, webhook)
 
   const ctx: RunContext = {
     agent,
@@ -825,20 +922,28 @@ async function runScript(args: string[], globals: DeviceGlobals) {
   }
 
   let summary = script.summary || "Device run completed"
+  let videoCapture: VideoCapture | null = null
+  let videoForWebhook: string | null = null
 
   try {
+    videoCapture = await startRunVideoCapture(udid, videoConfig)
+
     for (let i = 0; i < script.steps.length; i++) {
       await executeStep(ctx, script.steps[i], i)
     }
 
     const finalShot = await captureStepScreenshot(ctx, "final", "final success")
     markImportant(ctx, finalShot, "final success")
+    await stopRunVideoCapture(videoCapture)
+    videoCapture = null
+    videoForWebhook = await compressVideoFast(videoConfig.rawPath, videoConfig.compressedPath)
 
     const output = {
       ok: true,
       runId,
       runDir,
       udid,
+      video: videoForWebhook,
       steps: ctx.steps,
       importantShots: ctx.importantShots,
     }
@@ -846,11 +951,15 @@ async function runScript(args: string[], globals: DeviceGlobals) {
     writeFileSync(join(runDir, "run.json"), `${JSON.stringify(output, null, 2)}\n`)
 
     if (webhook) {
-      await postDiscordSummary(webhook, ctx, true, summary)
+      await postDiscordSummary(webhook, ctx, true, summary, videoForWebhook || undefined)
     }
 
     console.log(JSON.stringify(output, null, 2))
   } catch (error: any) {
+    await stopRunVideoCapture(videoCapture)
+    videoCapture = null
+    videoForWebhook = await compressVideoFast(videoConfig.rawPath, videoConfig.compressedPath)
+
     const message = error?.message || String(error)
     const stepFailure = ctx.steps.find((step) => !step.ok)
     const memory = searchIssueMemory(`${summary}\n${message}`, similarity)
@@ -878,6 +987,7 @@ async function runScript(args: string[], globals: DeviceGlobals) {
             summary: memory.hit.summary,
           }
         : null,
+      video: videoForWebhook,
       steps: ctx.steps,
       importantShots: ctx.importantShots,
     }
@@ -885,12 +995,13 @@ async function runScript(args: string[], globals: DeviceGlobals) {
     writeFileSync(join(runDir, "run.json"), `${JSON.stringify(output, null, 2)}\n`)
 
     if (webhook) {
-      await postDiscordSummary(webhook, ctx, false, `${summary}\nError: ${message}`)
+      await postDiscordSummary(webhook, ctx, false, `${summary}\nError: ${message}`, videoForWebhook || undefined)
     }
 
     console.log(JSON.stringify(output, null, 2))
     process.exit(1)
   } finally {
+    await stopRunVideoCapture(videoCapture)
     releaseLock(agent)
   }
 }
@@ -921,7 +1032,7 @@ Commands:
   hotline device status
   hotline device acquire --agent <id> [--udid <udid>] [--timeout <ms>]
   hotline device release [--agent <id>]
-  hotline device run --agent <id> --script <steps.json> [--discord-webhook <url>]
+  hotline device run --agent <id> --script <steps.json> [--discord-webhook <url>] [--video|--record-video]
   hotline device act <action> --agent <id> [action flags]
   hotline device simctl --agent <id> -- <simctl args>
 

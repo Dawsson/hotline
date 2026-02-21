@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires bun, React Native or Expo project
 metadata:
   author: Dawsson
-  version: "0.3.2"
+  version: "0.4.0"
 ---
 
 # Hotline
@@ -19,6 +19,7 @@ Local WebSocket dev bridge for React Native apps. Lets CLI tools and AI agents s
 - `references/handlers.md` — Standard handlers and the handler format
 - `references/agent-usage.md` — CLI commands and automation patterns for AI agents
 - `references/events.md` — Event system for real-time app-to-agent communication
+- `references/device-automation.md` — Serialized simulator queue, action scripts, screenshots, and Discord video summaries
 
 ## Quick Reference
 
@@ -27,3 +28,4 @@ Local WebSocket dev bridge for React Native apps. Lets CLI tools and AI agents s
 - Handler format: `{ handler, fields, description }` — no bare functions
 - Production safe: no-op when `__DEV__` is false
 - `ping` is built-in, no need to register it
+- Device automation: `hotline device run --agent <id> --script <steps.json> --discord-webhook <url>`
