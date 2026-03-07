@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.7] - 2026-03-07
+
+- Added per-connection routing metadata so multiple simulators can run the same app bundle without hotline sending commands to the wrong target
+- Added `--device` / `--udid` / `--connection` targeting in the CLI and updated docs for multi-simulator agent workflows
+
 ## [0.3.6] - 2026-02-18
 
 - Added `hotline ls` command to list connected app handlers with arg types and descriptions
