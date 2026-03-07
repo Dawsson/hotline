@@ -7,6 +7,7 @@ import {
   type HandlerSchema,
   type HotlineRequest,
   type HotlineResponse,
+  type HotlineTarget,
   type PendingRequest,
 } from "./types"
 
@@ -19,7 +20,9 @@ const pendingRequests = new Map<string, PendingRequest>()
 
 interface ClientData {
   role: "app" | "cli" | "watch" | "wait"
-  appId?: string // for apps: their id; for cli: target app id
+  appId?: string
+  deviceId?: string
+  connectionId?: string
   waitEvent?: string // for wait: which event to listen for
 }
 
@@ -29,23 +32,42 @@ function log(msg: string) {
 
 // ── App routing ──
 
-function findAppSocket(targetAppId?: string): ServerWebSocket<ClientData> | null {
-  const entries = [...apps.entries()]
-
-  if (entries.length === 0) return null
-
-  if (!targetAppId) {
-    if (entries.length === 1) return entries[0][0]
-    return null // ambiguous — caller handles error
+function appTarget(conn: AppConnection): Required<Pick<AppConnection, "appId" | "connectionId">> & HotlineTarget {
+  return {
+    appId: conn.appId,
+    connectionId: conn.connectionId,
+    deviceId: conn.deviceId,
+    deviceName: conn.deviceName,
+    platform: conn.platform,
   }
-
-  const matches = entries.filter(([, info]) => info.appId === targetAppId)
-  if (matches.length === 0) return null
-  return matches[0][0] // first match
 }
 
-function listAppIds(): string[] {
-  return [...new Set([...apps.values()].map((a) => a.appId))]
+function describeConnection(conn: AppConnection): string {
+  const parts = [conn.appId]
+  if (conn.deviceName) parts.push(conn.deviceName)
+  if (conn.deviceId) parts.push(conn.deviceId)
+  else parts.push(conn.connectionId)
+  return parts.join(" @ ")
+}
+
+function matchesTarget(conn: AppConnection, target: HotlineTarget): boolean {
+  if (target.connectionId) return conn.connectionId === target.connectionId
+  if (target.deviceId) return conn.deviceId === target.deviceId
+  if (target.appId) return conn.appId === target.appId
+  return true
+}
+
+function findAppMatches(target: HotlineTarget): Array<[ServerWebSocket<ClientData>, AppConnection]> {
+  return [...apps.entries()].filter(([, conn]) => matchesTarget(conn, target))
+}
+
+function resolveAppSocket(target: HotlineTarget): {
+  socket: ServerWebSocket<ClientData> | null
+  matches: Array<[ServerWebSocket<ClientData>, AppConnection]>
+} {
+  const matches = findAppMatches(target)
+  if (matches.length !== 1) return { socket: null, matches }
+  return { socket: matches[0][0], matches }
 }
 
 // ── Server handlers ──
@@ -63,7 +85,11 @@ handle("ping", () => ({}))
 handle("list-apps", () => {
   const appList = [...apps.values()].map((a) => ({
     appId: a.appId,
+    connectionId: a.connectionId,
     connectedAt: a.connectedAt,
+    deviceId: a.deviceId,
+    deviceName: a.deviceName,
+    platform: a.platform,
   }))
   return {
     port,
@@ -74,12 +100,21 @@ handle("list-apps", () => {
 })
 
 handle("list-handlers", (payload) => {
-  const targetAppId = payload?.appId as string | undefined
-  const result: { appId: string; handlers: HandlerSchema[] }[] = []
+  const target: HotlineTarget = {
+    appId: payload?.appId as string | undefined,
+    deviceId: payload?.deviceId as string | undefined,
+    connectionId: payload?.connectionId as string | undefined,
+  }
+  const result: Array<AppConnection & { handlers: HandlerSchema[] }> = []
   for (const conn of apps.values()) {
-    if (targetAppId && conn.appId !== targetAppId) continue
+    if (!matchesTarget(conn, target)) continue
     result.push({
+      connectionId: conn.connectionId,
       appId: conn.appId,
+      connectedAt: conn.connectedAt,
+      deviceId: conn.deviceId,
+      deviceName: conn.deviceName,
+      platform: conn.platform,
       handlers: conn.handlers ?? [],
     })
   }
@@ -106,7 +141,7 @@ function send(ws: ServerWebSocket<ClientData>, data: HotlineResponse) {
   ws.send(JSON.stringify(data))
 }
 
-function broadcast(event: { dir: "req" | "res"; appId?: string; msg: any }) {
+function broadcast(event: { dir: "req" | "res"; appId?: string; target?: HotlineTarget; msg: any }) {
   if (watchers.size === 0) return
   const payload = JSON.stringify(event)
   for (const w of watchers) {
@@ -121,8 +156,13 @@ function cleanupApp(ws: ServerWebSocket<ClientData>) {
   if (!info) return
 
   apps.delete(ws)
-  log(`App disconnected: ${info.appId}`)
-  broadcast({ dir: "req", appId: info.appId, msg: { type: "disconnect", appId: info.appId } })
+  log(`App disconnected: ${describeConnection(info)}`)
+  broadcast({
+    dir: "req",
+    appId: info.appId,
+    target: appTarget(info),
+    msg: { type: "disconnect", appId: info.appId, ...appTarget(info) },
+  })
 
   // Fail all pending requests routed to this app
   for (const [id, pending] of pendingRequests) {
@@ -150,6 +190,8 @@ const server = Bun.serve<ClientData>({
     const url = new URL(req.url)
     const role = url.searchParams.get("role")
     const appId = url.searchParams.get("app") || undefined
+    const deviceId = url.searchParams.get("device") || undefined
+    const connectionId = url.searchParams.get("connection") || undefined
     const waitEvent = url.searchParams.get("event") || undefined
 
     let clientRole: ClientData["role"] = "cli"
@@ -157,7 +199,7 @@ const server = Bun.serve<ClientData>({
     else if (role === "wait") clientRole = "wait"
 
     const upgraded = server.upgrade(req, {
-      data: { role: clientRole, appId, waitEvent },
+      data: { role: clientRole, appId, deviceId, connectionId, waitEvent },
     })
 
     if (!upgraded) {
@@ -186,19 +228,40 @@ const server = Bun.serve<ClientData>({
 
       // App registration
       if (msg.type === "register" && msg.role === "app" && msg.appId) {
-        ws.data = { role: "app", appId: msg.appId }
-        const conn: AppConnection = { appId: msg.appId, connectedAt: Date.now() }
+        const connectionId = crypto.randomUUID()
+        ws.data = { role: "app", appId: msg.appId, deviceId: msg.deviceId, connectionId }
+        const conn: AppConnection = {
+          connectionId,
+          appId: msg.appId,
+          connectedAt: Date.now(),
+          deviceId: msg.deviceId,
+          deviceName: msg.deviceName,
+          platform: msg.platform,
+        }
         if (msg.handlers) conn.handlers = msg.handlers
         apps.set(ws, conn)
-        log(`App registered: ${msg.appId}${msg.handlers ? ` (${msg.handlers.length} handlers)` : ""}`)
-        broadcast({ dir: "req", appId: msg.appId, msg: { type: "register", appId: msg.appId, handlers: msg.handlers } })
+        log(`App registered: ${describeConnection(conn)}${msg.handlers ? ` (${msg.handlers.length} handlers)` : ""}`)
+        broadcast({
+          dir: "req",
+          appId: msg.appId,
+          target: appTarget(conn),
+          msg: { type: "register", appId: msg.appId, handlers: msg.handlers, ...appTarget(conn) },
+        })
         return
       }
 
       // Event from app → broadcast to watchers + deliver to waiting CLIs
       if (msg.type === "event" && msg.event && ws.data.role === "app") {
         const appInfo = apps.get(ws)
-        const event = { type: "event", event: msg.event, appId: appInfo?.appId, data: msg.data }
+        const event = {
+          type: "event",
+          event: msg.event,
+          appId: appInfo?.appId,
+          connectionId: appInfo?.connectionId,
+          deviceId: appInfo?.deviceId,
+          deviceName: appInfo?.deviceName,
+          data: msg.data,
+        }
         const payload = JSON.stringify(event)
 
         // Broadcast to watchers (shows in stream)
@@ -206,7 +269,12 @@ const server = Bun.serve<ClientData>({
 
         // Deliver to matching waiters and close them
         for (const w of waiters) {
-          if (w.data.waitEvent === msg.event && (!w.data.appId || w.data.appId === appInfo?.appId)) {
+          const waiterTarget: HotlineTarget = {
+            appId: w.data.appId,
+            deviceId: w.data.deviceId,
+            connectionId: w.data.connectionId,
+          }
+          if (w.data.waitEvent === msg.event && appInfo && matchesTarget(appInfo, waiterTarget)) {
             w.send(payload)
             w.close()
             waiters.delete(w)
@@ -221,7 +289,7 @@ const server = Bun.serve<ClientData>({
         if (pending) {
           clearTimeout(pending.timer)
           const appInfo = apps.get(pending.appSocket as ServerWebSocket<ClientData>)
-          broadcast({ dir: "res", appId: appInfo?.appId, msg })
+          broadcast({ dir: "res", appId: appInfo?.appId, target: appInfo ? appTarget(appInfo) : undefined, msg })
           const cliWs = pending.cliSocket as ServerWebSocket<ClientData>
           cliWs.send(JSON.stringify(msg))
           pendingRequests.delete(msg.id)
@@ -234,22 +302,20 @@ const server = Bun.serve<ClientData>({
         // Server-handled commands (no app needed)
         if (await handleServerCommand(ws, msg)) return
 
-        const targetAppId = ws.data.appId
-        const appSocket = findAppSocket(targetAppId)
-
-        if (!appSocket && !targetAppId && apps.size > 1) {
-          send(ws, {
-            id: msg.id,
-            ok: false,
-            error: `Multiple apps connected. Specify --app. Available: ${listAppIds().join(", ")}`,
-          })
-          return
+        const target: HotlineTarget = {
+          appId: ws.data.appId,
+          deviceId: ws.data.deviceId,
+          connectionId: ws.data.connectionId,
         }
+        const { socket: appSocket, matches } = resolveAppSocket(target)
 
         if (!appSocket) {
-          const hint = targetAppId
-            ? `No app connected with id: ${targetAppId}`
-            : "No app connected"
+          const hasExplicitTarget = Boolean(target.connectionId || target.deviceId || target.appId)
+          const hint = matches.length > 1
+            ? `Multiple app connections matched. Specify --device or --connection. Available: ${matches.map(([, conn]) => describeConnection(conn)).join(", ")}`
+            : hasExplicitTarget
+              ? `No app connected for target: ${target.connectionId ?? target.deviceId ?? target.appId}`
+              : "No app connected"
           send(ws, { id: msg.id, ok: false, error: hint })
           return
         }
@@ -267,7 +333,12 @@ const server = Bun.serve<ClientData>({
         })
 
         const appInfo = apps.get(appSocket)
-        broadcast({ dir: "req", appId: appInfo?.appId, msg: { id: msg.id, type: msg.type, payload: msg.payload } })
+        broadcast({
+          dir: "req",
+          appId: appInfo?.appId,
+          target: appInfo ? appTarget(appInfo) : undefined,
+          msg: { id: msg.id, type: msg.type, payload: msg.payload },
+        })
         appSocket.send(JSON.stringify({ id: msg.id, type: msg.type, payload: msg.payload }))
       }
     },

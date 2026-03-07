@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test"
 import { type Subprocess } from "bun"
-import type { HotlineRequest, HotlineResponse } from "./types"
+import type { HotlineRequest, HotlineResponse, HotlineTarget } from "./types"
 
 // ── Helpers ──
 
@@ -43,10 +43,13 @@ function stopServer(proc: Subprocess) {
 }
 
 /** Open a WebSocket and wait for it to be ready */
-function openWs(role: "cli" | "watch" | "app", appTarget?: string): Promise<WebSocket> {
+function openWs(role: "cli" | "watch" | "app", target: HotlineTarget = {}): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    let url = `ws://localhost:${TEST_PORT}?role=${role}`
-    if (appTarget) url += `&app=${encodeURIComponent(appTarget)}`
+    const params = new URLSearchParams({ role })
+    if (target.appId) params.set("app", target.appId)
+    if (target.deviceId) params.set("device", target.deviceId)
+    if (target.connectionId) params.set("connection", target.connectionId)
+    const url = `ws://localhost:${TEST_PORT}?${params.toString()}`
     const ws = new WebSocket(url)
     ws.onopen = () => resolve(ws)
     ws.onerror = (e) => reject(e)
@@ -55,9 +58,12 @@ function openWs(role: "cli" | "watch" | "app", appTarget?: string): Promise<WebS
 }
 
 /** Register as an app on an existing WebSocket */
-function registerApp(ws: WebSocket, appId: string, handlers?: any[]) {
+function registerApp(ws: WebSocket, appId: string, handlers?: any[], target: HotlineTarget = {}) {
   const msg: any = { type: "register", role: "app", appId }
   if (handlers) msg.handlers = handlers
+  if (target.deviceId) msg.deviceId = target.deviceId
+  if (target.deviceName) msg.deviceName = target.deviceName
+  if (target.platform) msg.platform = target.platform
   ws.send(JSON.stringify(msg))
 }
 
@@ -156,7 +162,7 @@ describe("server built-in commands", () => {
 
   test("list-apps shows connected app", async () => {
     const app = trackWs(await openWs("app"))
-    registerApp(app, "com.test.myapp")
+    registerApp(app, "com.test.myapp", undefined, { deviceId: "sim-1", deviceName: "iPhone 17 Pro", platform: "ios" })
     await tick()
 
     const cli = trackWs(await openWs("cli"))
@@ -166,6 +172,10 @@ describe("server built-in commands", () => {
     const data = res.data as any
     expect(data.apps).toHaveLength(1)
     expect(data.apps[0].appId).toBe("com.test.myapp")
+    expect(data.apps[0].deviceId).toBe("sim-1")
+    expect(data.apps[0].deviceName).toBe("iPhone 17 Pro")
+    expect(data.apps[0].platform).toBe("ios")
+    expect(typeof data.apps[0].connectionId).toBe("string")
     expect(typeof data.apps[0].connectedAt).toBe("number")
   })
 
@@ -250,10 +260,45 @@ describe("CLI → App request routing", () => {
       }
     }
 
-    const cli = trackWs(await openWs("cli", "com.test.alpha"))
+    const cli = trackWs(await openWs("cli", { appId: "com.test.alpha" }))
     const res = await request(cli, "who-are-you")
     expect(res.ok).toBe(true)
     expect(res.data).toEqual({ from: "alpha" })
+  })
+
+  test("same appId requires device targeting when multiple simulators are connected", async () => {
+    const app1 = trackWs(await openWs("app"))
+    registerApp(app1, "com.test.dupe", undefined, { deviceId: "SIM-001", deviceName: "iPhone 17 Pro" })
+    const app2 = trackWs(await openWs("app"))
+    registerApp(app2, "com.test.dupe", undefined, { deviceId: "SIM-002", deviceName: "iPhone 17 Pro" })
+    await tick()
+
+    const cli = trackWs(await openWs("cli", { appId: "com.test.dupe" }))
+    const res = await request(cli, "hello")
+    expect(res.ok).toBe(false)
+    expect(res.error).toContain("Specify --device or --connection")
+    expect(res.error).toContain("SIM-001")
+    expect(res.error).toContain("SIM-002")
+  })
+
+  test("routes to targeted simulator with deviceId", async () => {
+    const app1 = trackWs(await openWs("app"))
+    registerApp(app1, "com.test.dupe", undefined, { deviceId: "SIM-001", deviceName: "iPhone 17 Pro" })
+    const app2 = trackWs(await openWs("app"))
+    registerApp(app2, "com.test.dupe", undefined, { deviceId: "SIM-002", deviceName: "iPhone 17 Pro" })
+    await tick()
+
+    app2.onmessage = (event) => {
+      const msg = JSON.parse(String(event.data))
+      if (msg.id && msg.type) {
+        app2.send(JSON.stringify({ id: msg.id, ok: true, data: { from: "SIM-002" } }))
+      }
+    }
+
+    const cli = trackWs(await openWs("cli", { deviceId: "SIM-002" }))
+    const res = await request(cli, "who-are-you")
+    expect(res.ok).toBe(true)
+    expect(res.data).toEqual({ from: "SIM-002" })
   })
 
   test("multiple apps without --app returns ambiguous error", async () => {
@@ -266,7 +311,7 @@ describe("CLI → App request routing", () => {
     const cli = trackWs(await openWs("cli"))
     const res = await request(cli, "some-cmd")
     expect(res.ok).toBe(false)
-    expect(res.error).toContain("Multiple apps")
+    expect(res.error).toContain("Multiple app connections matched")
     expect(res.error).toContain("com.test.one")
     expect(res.error).toContain("com.test.two")
   })
@@ -276,10 +321,10 @@ describe("CLI → App request routing", () => {
     registerApp(app, "com.test.real")
     await tick()
 
-    const cli = trackWs(await openWs("cli", "com.test.ghost"))
+    const cli = trackWs(await openWs("cli", { appId: "com.test.ghost" }))
     const res = await request(cli, "hello")
     expect(res.ok).toBe(false)
-    expect(res.error).toContain("No app connected with id: com.test.ghost")
+    expect(res.error).toContain("No app connected for target: com.test.ghost")
   })
 })
 
@@ -296,6 +341,7 @@ describe("watch mode", () => {
     const event = await msgPromise
     expect(event.dir).toBe("req")
     expect(event.appId).toBe("com.test.watched")
+    expect(typeof event.target.connectionId).toBe("string")
     expect(event.msg.type).toBe("register")
   })
 
@@ -456,7 +502,7 @@ describe("createHotline client", () => {
     expect(apps.some((a: any) => a.appId === "com.test.client-lib")).toBe(true)
 
     // Send command to the client library app
-    const cliTargeted = trackWs(await openWs("cli", "com.test.client-lib"))
+    const cliTargeted = trackWs(await openWs("cli", { appId: "com.test.client-lib" }))
     const res = await request(cliTargeted, "greet", { name: "World" })
     expect(res.ok).toBe(true)
     expect(res.data).toEqual({ greeting: "Hello, World!" })
@@ -482,7 +528,7 @@ describe("createHotline client", () => {
     hotline.connect()
     await tick(50)
 
-    const cli = trackWs(await openWs("cli", "com.test.async-client"))
+    const cli = trackWs(await openWs("cli", { appId: "com.test.async-client" }))
     const res = await request(cli, "slow-op")
     expect(res.ok).toBe(true)
     expect(res.data).toEqual({ done: true })
@@ -506,7 +552,7 @@ describe("createHotline client", () => {
     hotline.connect()
     await tick(50)
 
-    const cli = trackWs(await openWs("cli", "com.test.err-client"))
+    const cli = trackWs(await openWs("cli", { appId: "com.test.err-client" }))
     const res = await request(cli, "will-fail")
     expect(res.ok).toBe(false)
     expect(res.error).toBe("handler exploded")
@@ -525,7 +571,7 @@ describe("createHotline client", () => {
     hotline.connect()
     await tick(50)
 
-    const cli = trackWs(await openWs("cli", "com.test.unknown-cmd"))
+    const cli = trackWs(await openWs("cli", { appId: "com.test.unknown-cmd" }))
     const res = await request(cli, "nonexistent")
     expect(res.ok).toBe(false)
     expect(res.error).toContain("Unknown command")
@@ -546,7 +592,7 @@ describe("createHotline client", () => {
     hotline.connect()
     await tick(50)
 
-    const cli = trackWs(await openWs("cli", "com.test.dynamic"))
+    const cli = trackWs(await openWs("cli", { appId: "com.test.dynamic" }))
     const res = await request(cli, "added-later")
     expect(res.ok).toBe(true)
     expect(res.data).toEqual({ dynamic: true })
@@ -565,7 +611,7 @@ describe("createHotline client", () => {
     hotline.connect()
     await tick(50)
 
-    const cli = trackWs(await openWs("cli", "com.test.ping-client"))
+    const cli = trackWs(await openWs("cli", { appId: "com.test.ping-client" }))
     const res = await request(cli, "ping")
     // Server handles ping before app, so this hits the server handler
     expect(res.ok).toBe(true)
@@ -596,9 +642,9 @@ describe("edge cases", () => {
 
   test("multiple apps can register with same appId", async () => {
     const app1 = trackWs(await openWs("app"))
-    registerApp(app1, "com.test.dupe")
+    registerApp(app1, "com.test.dupe", undefined, { deviceId: "SIM-001" })
     const app2 = trackWs(await openWs("app"))
-    registerApp(app2, "com.test.dupe")
+    registerApp(app2, "com.test.dupe", undefined, { deviceId: "SIM-002" })
     await tick()
 
     const cli = trackWs(await openWs("cli"))
@@ -606,6 +652,7 @@ describe("edge cases", () => {
     const apps = (res.data as any).apps
     const dupes = apps.filter((a: any) => a.appId === "com.test.dupe")
     expect(dupes.length).toBe(2)
+    expect(new Set(dupes.map((a: any) => a.deviceId)).size).toBe(2)
   })
 
   test("rapid connect/disconnect cycles don't crash", async () => {
