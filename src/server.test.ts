@@ -484,6 +484,11 @@ describe("createHotline client", () => {
     const hotline = createHotline({
       port: TEST_PORT,
       appId: "com.test.client-lib",
+      target: {
+        deviceId: "SIM-CLIENT-1",
+        deviceName: "iPhone 17 Pro",
+        platform: "ios",
+      },
       handlers: {
         greet: { handler: (payload: any) => {
           handlerCalled = true
@@ -499,10 +504,10 @@ describe("createHotline client", () => {
     const cli = trackWs(await openWs("cli"))
     const listRes = await request(cli, "list-apps")
     const apps = (listRes.data as any).apps
-    expect(apps.some((a: any) => a.appId === "com.test.client-lib")).toBe(true)
+    expect(apps.some((a: any) => a.appId === "com.test.client-lib" && a.deviceId === "SIM-CLIENT-1")).toBe(true)
 
     // Send command to the client library app
-    const cliTargeted = trackWs(await openWs("cli", { appId: "com.test.client-lib" }))
+    const cliTargeted = trackWs(await openWs("cli", { deviceId: "SIM-CLIENT-1" }))
     const res = await request(cliTargeted, "greet", { name: "World" })
     expect(res.ok).toBe(true)
     expect(res.data).toEqual({ greeting: "Hello, World!" })

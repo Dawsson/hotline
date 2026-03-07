@@ -28,4 +28,5 @@ Local WebSocket dev bridge for React Native apps. Lets CLI tools and AI agents s
 - Handler format: `{ handler, fields, description }` — no bare functions
 - Production safe: no-op when `__DEV__` is false
 - `ping` is built-in, no need to register it
+- For duplicate simulators of the same app, register `target.deviceId` and target agents with `--udid`
 - Device automation: `hotline device run --agent <id> --script <steps.json> --discord-webhook <url>`

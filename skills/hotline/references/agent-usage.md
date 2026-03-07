@@ -15,7 +15,7 @@ How to use hotline from the CLI or as an AI agent to interact with a running Rea
 | `hotline status` | Show connected apps |
 | `hotline device <subcommand>` | Serialized simulator automation for agents |
 
-**Flags:** `--port <N>` (default 8675) `--timeout <ms>` (default 5000) `--app <appId>`
+**Flags:** `--port <N>` (default 8675) `--timeout <ms>` (default 5000) `--app <appId>` `--device <id>` `--udid <id>` `--connection <id>`
 
 **Output:** stdout = JSON data only (pipeable). stderr = logs/errors.
 
@@ -55,14 +55,30 @@ hotline cmd get-state --key auth --app com.example.otherapp
 
 If only one app is connected, `--app` is optional — it auto-selects.
 
+## Multi-Simulator Targeting
+
+When multiple copies of the same app are connected, `--app` is not enough. Use the simulator identity instead:
+
+```bash
+hotline status
+hotline cmd ping --udid F1B2C3D4-...
+hotline wait error --udid F1B2C3D4-... --timeout 3000 || true
+hotline ls --udid F1B2C3D4-...
+```
+
+Recommended pattern:
+- register each app connection with `target.deviceId` set to the real simulator UDID
+- use `--udid` from agents because it lines up with iOS simulator tooling
+- reserve `--connection` for one exact live socket when you need to disambiguate reconnects
+
 ## Automation Pattern
 
 After writing code that triggers a hot reload:
 
 ```bash
-hotline wait-for-app                        # block until app reconnects
-hotline wait error --timeout 3000 || true   # check for crashes (timeout = no crash)
-hotline cmd get-state --key <key>           # verify state
+hotline wait-for-app --udid <sim-udid>            # block until that simulator reconnects
+hotline wait error --udid <sim-udid> --timeout 3000 || true
+hotline cmd get-state --key <key> --udid <sim-udid>
 ```
 
 ## Chaining Commands

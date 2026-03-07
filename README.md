@@ -40,6 +40,11 @@ import { useHotline } from "@dawsson/hotline/src/client"
 function App() {
   useHotline({
     appId: "com.example.myapp",
+    target: {
+      deviceId: "F1B2C3D4-...", // ideally the simulator UDID on iOS
+      deviceName: "iPhone 17 Pro",
+      platform: "ios",
+    },
     handlers: {
       "get-state": {
         handler: ({ key }) => store.getState()[key],
@@ -55,13 +60,15 @@ function App() {
 
 Auto-reconnects, no-ops in production, `ping` is built-in.
 
+When you run the same app on multiple simulators, set `target.deviceId` to a real simulator identity such as the iOS simulator UDID. `appId` stays the bundle identifier, but routing should use the simulator identity.
+
 ## CLI
 
 ```bash
 hotline cmd get-state --key currentUser   # send a command
 hotline query user                        # shorthand for get-state
 hotline wait navigation                   # block until event fires
-hotline wait-for-app                      # block until app connects
+hotline wait-for-app --udid F1B2C3D4-...  # block until a specific simulator connects
 hotline watch                             # interactive TUI
 ```
 

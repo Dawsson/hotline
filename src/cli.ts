@@ -33,6 +33,8 @@ function getVersion(): string {
 const port = parseInt(flag("port") || "") || DEFAULT_PORT
 const timeout = parseInt(flag("timeout") || "") || DEFAULT_TIMEOUT
 const appId = flag("app")
+const deviceId = flag("device") || flag("udid")
+const connectionId = flag("connection")
 
 // ── Helpers ──
 
@@ -56,7 +58,11 @@ async function wsRequest(
   type: string,
   payload?: Record<string, unknown>
 ): Promise<any> {
-  const url = `ws://localhost:${port}${appId ? `?app=${encodeURIComponent(appId)}` : ""}`
+  const params = new URLSearchParams()
+  if (appId) params.set("app", appId)
+  if (deviceId) params.set("device", deviceId)
+  if (connectionId) params.set("connection", connectionId)
+  const url = `ws://localhost:${port}${params.size > 0 ? `?${params.toString()}` : ""}`
   const id = crypto.randomUUID()
 
   return new Promise((resolve, reject) => {
@@ -152,6 +158,14 @@ function formatUptime(seconds: number): string {
   return `${h}h ${m}m`
 }
 
+function formatTarget(app: { appId: string; deviceName?: string; deviceId?: string; connectionId?: string }) {
+  const suffix = app.deviceId ?? app.connectionId
+  if (app.deviceName && suffix) return `${app.appId} @ ${app.deviceName} (${suffix})`
+  if (app.deviceName) return `${app.appId} @ ${app.deviceName}`
+  if (suffix) return `${app.appId} @ ${suffix}`
+  return app.appId
+}
+
 async function status() {
   try {
     const res = await wsRequest("list-apps")
@@ -161,9 +175,9 @@ async function status() {
       if (apps.length === 0) {
         console.error("No apps connected.")
       } else {
-        console.error(`${apps.length} app${apps.length > 1 ? "s" : ""} connected:`)
+        console.error(`${apps.length} app connection${apps.length > 1 ? "s" : ""} connected:`)
         for (const app of apps) {
-          console.error(`  - ${app.appId}`)
+          console.error(`  - ${formatTarget(app)}`)
         }
       }
       console.log(JSON.stringify(res.data))
@@ -178,7 +192,7 @@ async function status() {
 function collectInlineArgs(startIndex: number): Record<string, unknown> | undefined {
   const payload: Record<string, unknown> = {}
   // Skip known global flags
-  const globalFlags = new Set(["port", "timeout", "app", "payload", "passive", "daemon"])
+  const globalFlags = new Set(["port", "timeout", "app", "device", "udid", "connection", "payload", "passive", "daemon", "json"])
   for (let i = startIndex; i < args.length; i++) {
     if (args[i].startsWith("--")) {
       const key = args[i].slice(2)
@@ -280,14 +294,14 @@ async function passiveWatch() {
         // Event from app
         if (data.type === "event") {
           const yellow = "\x1b[33m"
-          const app = data.appId ? `${dim}${data.appId}${reset}` : ""
+          const app = data.appId ? `${dim}${formatTarget(data)}${reset}` : ""
           const body = data.data != null ? ` ${dim}${JSON.stringify(data.data)}${reset}` : ""
           console.error(`${dim}${time}${reset} ${yellow}★${reset} ${yellow}${data.event}${reset} ${app}${body}`)
           return
         }
 
         const { dir, appId: evAppId, msg } = data
-        const app = evAppId ? `${dim}${evAppId}${reset}` : ""
+        const app = evAppId ? `${dim}${formatTarget({ appId: evAppId, ...data.target })}${reset}` : ""
 
         if (dir === "req") {
           const arrow = `${cyan}▶${reset}`
@@ -322,6 +336,8 @@ async function wait() {
 
   const params = new URLSearchParams({ role: "wait", event })
   if (appId) params.set("app", appId)
+  if (deviceId) params.set("device", deviceId)
+  if (connectionId) params.set("connection", connectionId)
   const url = `ws://localhost:${port}?${params}`
 
   return new Promise<void>((_, reject) => {
@@ -363,10 +379,15 @@ async function waitForApp() {
     const checkRes = await wsRequest("list-apps")
     if (checkRes.ok) {
       const apps = (checkRes.data as any).apps as { appId: string }[]
-      const match = targetApp ? apps.find((a) => a.appId === targetApp) : apps[0]
+      const match = apps.find((a: any) => {
+        if (connectionId && a.connectionId !== connectionId) return false
+        if (deviceId && a.deviceId !== deviceId) return false
+        if (targetApp && a.appId !== targetApp) return false
+        return true
+      }) ?? (!targetApp && !deviceId && !connectionId ? apps[0] : undefined)
       if (match) {
         clearTimeout(timer)
-        console.log(JSON.stringify({ appId: match.appId }))
+        console.log(JSON.stringify(match))
         process.exit(0)
       }
     }
@@ -388,9 +409,19 @@ async function waitForApp() {
         const data = JSON.parse(String(ev.data))
         if (data.dir === "req" && data.msg?.type === "register") {
           const registeredApp = data.msg.appId || data.appId
-          if (!targetApp || registeredApp === targetApp) {
+          const registeredDevice = data.msg.deviceId || data.target?.deviceId
+          const registeredConnection = data.msg.connectionId || data.target?.connectionId
+          const matchesTarget = (!targetApp || registeredApp === targetApp)
+            && (!deviceId || registeredDevice === deviceId)
+            && (!connectionId || registeredConnection === connectionId)
+          if (matchesTarget) {
             clearTimeout(timer)
-            console.log(JSON.stringify({ appId: registeredApp }))
+            console.log(JSON.stringify({
+              appId: registeredApp,
+              deviceId: registeredDevice,
+              deviceName: data.msg.deviceName || data.target?.deviceName,
+              connectionId: registeredConnection,
+            }))
             ws.close()
             process.exit(0)
           }
@@ -407,11 +438,13 @@ async function waitForApp() {
 
 async function ls() {
   try {
-    const payload = appId ? { appId } : undefined
+    const payload = appId || deviceId || connectionId
+      ? { appId, deviceId, connectionId }
+      : undefined
     const res = await wsRequest("list-handlers", payload)
     if (!res.ok) die(res.error || "Failed to list handlers")
 
-    const data = res.data as { appId: string; handlers: HandlerSchema[] }[]
+    const data = res.data as Array<{ appId: string; deviceId?: string; deviceName?: string; connectionId?: string; handlers: HandlerSchema[] }>
 
     if (hasFlag("json")) {
       console.log(JSON.stringify(data, null, 2))
@@ -423,9 +456,10 @@ async function ls() {
       return
     }
 
-    for (const { appId: aid, handlers } of data) {
+    for (const item of data) {
+      const { handlers } = item
       const count = handlers.length
-      console.log(`${aid} — ${count} handler${count !== 1 ? "s" : ""}`)
+      console.log(`${formatTarget(item)} — ${count} handler${count !== 1 ? "s" : ""}`)
       if (count === 0) {
         console.log("  (none registered)")
       } else {
@@ -496,7 +530,8 @@ Commands:
   stop                      Stop daemonized server
   restart                   Kill and relaunch server (picks up new code)
   status                    Show connected apps
-  ls [--app <id>] [--json]  List app handlers with arg types and descriptions
+  ls [--app <id>] [--device <id>] [--connection <id>] [--json]
+                            List app handlers with arg types and descriptions
   cmd <type> [--key val]    Send command to app (inline args or --payload)
   query <key>               Shorthand for get-state command
   wait <event>              Block until app emits event, print payload
@@ -511,7 +546,9 @@ Flags:
   --version, -v             Show version
   --port <number>           Server port (default: ${DEFAULT_PORT})
   --timeout <ms>            Request timeout (default: ${DEFAULT_TIMEOUT})
-  --app <appId>             Target specific app`)
+  --app <appId>             Target a bundle identifier
+  --device, --udid <id>     Target a specific simulator/device identity
+  --connection <id>         Target one live connection exactly`)
   process.exit(1)
 }
 
