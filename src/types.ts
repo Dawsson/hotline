@@ -26,10 +26,20 @@ export interface HandlerSchema {
   fields?: HandlerField[]
 }
 
+export interface HotlineTarget {
+  connectionId?: string
+  deviceId?: string
+  deviceName?: string
+  platform?: string
+}
+
 export interface HotlineRegister {
   type: "register"
   role: "app"
   appId: string
+  deviceId?: string
+  deviceName?: string
+  platform?: string
   handlers: HandlerSchema[]
 }
 
@@ -45,8 +55,12 @@ export type HotlineMessage = HotlineRequest | HotlineResponse | HotlineRegister 
 // ── Server internals ──
 
 export interface AppConnection {
+  connectionId: string
   appId: string
   connectedAt: number
+  deviceId?: string
+  deviceName?: string
+  platform?: string
   handlers?: HandlerSchema[]
 }
 

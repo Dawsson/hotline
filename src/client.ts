@@ -1,5 +1,5 @@
 import { DEFAULT_PORT, RECONNECT_CAP_MS } from "./types"
-import type { HotlineRequest, HotlineResponse, HandlerField, HandlerSchema } from "./types"
+import type { HotlineRequest, HotlineResponse, HandlerField, HandlerSchema, HotlineTarget } from "./types"
 
 // ── Types ──
 
@@ -12,6 +12,7 @@ export interface HandlerConfig {
 export interface HotlineOptions {
   port?: number
   appId: string
+  target?: HotlineTarget
   handlers?: Record<string, HandlerConfig>
 }
 
@@ -66,6 +67,9 @@ export function createHotline(options: HotlineOptions): Hotline {
         type: "register",
         role: "app",
         appId: options.appId,
+        deviceId: options.target?.deviceId,
+        deviceName: options.target?.deviceName,
+        platform: options.target?.platform,
         handlers: handlerSchemas,
       }))
     }
